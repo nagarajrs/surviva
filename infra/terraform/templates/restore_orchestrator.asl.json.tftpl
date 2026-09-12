@@ -217,22 +217,6 @@
                 "commands": ["{% '${restore_command_prefix} ' & $item.job_id.S %}"]
               }
             },
-            "Next": "MarkRestored"
-          },
-          "MarkRestored": {
-            "Type": "Task",
-            "Resource": "arn:aws:states:::aws-sdk:dynamodb:updateItem",
-            "Arguments": {
-              "TableName": "${table_name}",
-              "Key": {
-                "job_id": { "S": "{% $item.job_id.S %}" }
-              },
-              "UpdateExpression": "SET #status = :status",
-              "ExpressionAttributeNames": { "#status": "status" },
-              "ExpressionAttributeValues": {
-                ":status": { "S": "RESTORED" }
-              }
-            },
             "End": true
           }
         }

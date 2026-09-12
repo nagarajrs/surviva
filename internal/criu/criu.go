@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 )
 
 // BinaryName is the executable surviva looks for on PATH.
@@ -44,23 +45,36 @@ func Dump(ctx context.Context, pid int, imagesDir string) error {
 	return nil
 }
 
-// Restore resumes a process tree previously dumped into imagesDir.
-// --restore-detached returns control to the caller once the tree is
-// running rather than blocking for its lifetime.
-func Restore(ctx context.Context, imagesDir string) error {
+// Restore resumes a process tree previously dumped into imagesDir and
+// returns the restored root task's PID. --restore-detached returns control
+// to the caller once the tree is running rather than blocking for its
+// lifetime; --pidfile is how a detached restore reports which PID it
+// resumed as.
+func Restore(ctx context.Context, imagesDir string) (int, error) {
 	logFile := filepath.Join(imagesDir, "restore.log")
+	pidFile := filepath.Join(imagesDir, "restore.pid")
 	cmd := exec.CommandContext(ctx, BinaryName,
 		"restore",
 		"--images-dir", imagesDir,
 		"--restore-detached",
+		"--pidfile", pidFile,
 		"--log-file", logFile,
 		"-v4",
 	)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("criu restore from %s: %w\n%s\n(see %s)", imagesDir, err, out, logFile)
+		return 0, fmt.Errorf("criu restore from %s: %w\n%s\n(see %s)", imagesDir, err, out, logFile)
 	}
-	return nil
+
+	raw, err := os.ReadFile(pidFile)
+	if err != nil {
+		return 0, fmt.Errorf("criu restore from %s: succeeded but couldn't read %s: %w", imagesDir, pidFile, err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if err != nil {
+		return 0, fmt.Errorf("criu restore from %s: invalid pid in %s: %w", imagesDir, pidFile, err)
+	}
+	return pid, nil
 }
 
 // Available reports whether the criu binary can be found on PATH.

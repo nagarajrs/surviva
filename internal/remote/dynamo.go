@@ -19,13 +19,21 @@ import (
 
 // Record is one item in the DynamoDB job status table.
 type Record struct {
-	JobID            string    `dynamodbav:"job_id"`
-	InstanceID       string    `dynamodbav:"instance_id,omitempty"`
-	AZ               string    `dynamodbav:"az,omitempty"`
-	Command          []string  `dynamodbav:"command"`
-	Priority         int       `dynamodbav:"priority"`
-	CheckpointMethod string    `dynamodbav:"checkpoint_method"` // "criu" | "hook"
-	StorageType      string    `dynamodbav:"storage_type"`      // "s3" | "ebs"
+	JobID      string   `dynamodbav:"job_id"`
+	InstanceID string   `dynamodbav:"instance_id,omitempty"`
+	AZ         string   `dynamodbav:"az,omitempty"`
+	Command    []string `dynamodbav:"command"`
+	WorkDir    string   `dynamodbav:"work_dir,omitempty"`
+	Priority   int      `dynamodbav:"priority"`
+	// HookCheckpoint/HookResume are carried through so a restored process
+	// keeps its custom checkpoint/resume scripts if it's tracked again on
+	// the new instance (the restore is recursive: that instance can itself
+	// be interrupted). Both are paths expected to exist on any instance
+	// running this job's AMI, not data uploaded anywhere.
+	HookCheckpoint   string `dynamodbav:"hook_checkpoint,omitempty"`
+	HookResume       string `dynamodbav:"hook_resume,omitempty"`
+	CheckpointMethod string `dynamodbav:"checkpoint_method"` // "criu" | "hook"
+	StorageType      string `dynamodbav:"storage_type"`      // "s3" | "ebs"
 	S3URI            string    `dynamodbav:"s3_uri,omitempty"`
 	SizeBytes        int64     `dynamodbav:"size_bytes,omitempty"`
 	EBSVolumeID      string    `dynamodbav:"ebs_volume_id,omitempty"`
@@ -143,6 +151,65 @@ func (s *StatusStore) Fail(ctx context.Context, jobID, reason string) error {
 		return fmt.Errorf("mark job %s incomplete: %w", jobID, err)
 	}
 	return nil
+}
+
+// Restoring marks a job as actively being restored on a new instance.
+// Called before the (potentially slow) download/mount and criu/hook resume
+// work starts, on the same "mark before the risky step" principle as Put.
+func (s *StatusStore) Restoring(ctx context.Context, jobID string) error {
+	if err := s.setStatus(ctx, jobID, job.StatusRestoring); err != nil {
+		return fmt.Errorf("mark job %s restoring: %w", jobID, err)
+	}
+	return nil
+}
+
+// Restored marks a job as successfully resumed on the new instance.
+func (s *StatusStore) Restored(ctx context.Context, jobID string) error {
+	if err := s.setStatus(ctx, jobID, job.StatusRestored); err != nil {
+		return fmt.Errorf("mark job %s restored: %w", jobID, err)
+	}
+	return nil
+}
+
+// RestoreFailed marks a job's restore attempt as failed, recording why.
+func (s *StatusStore) RestoreFailed(ctx context.Context, jobID, reason string) error {
+	_, err := s.client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+		TableName: aws.String(s.tableName),
+		Key: map[string]types.AttributeValue{
+			"job_id": &types.AttributeValueMemberS{Value: jobID},
+		},
+		UpdateExpression: aws.String("SET #status = :status, failure_reason = :reason, updated_at = :updated_at"),
+		ExpressionAttributeNames: map[string]string{
+			"#status": "status",
+		},
+		ExpressionAttributeValues: map[string]types.AttributeValue{
+			":status":     &types.AttributeValueMemberS{Value: string(job.StatusFailed)},
+			":reason":     &types.AttributeValueMemberS{Value: reason},
+			":updated_at": &types.AttributeValueMemberS{Value: time.Now().UTC().Format(time.RFC3339)},
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("mark job %s restore failed: %w", jobID, err)
+	}
+	return nil
+}
+
+func (s *StatusStore) setStatus(ctx context.Context, jobID string, status job.Status) error {
+	_, err := s.client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+		TableName: aws.String(s.tableName),
+		Key: map[string]types.AttributeValue{
+			"job_id": &types.AttributeValueMemberS{Value: jobID},
+		},
+		UpdateExpression: aws.String("SET #status = :status, updated_at = :updated_at"),
+		ExpressionAttributeNames: map[string]string{
+			"#status": "status",
+		},
+		ExpressionAttributeValues: map[string]types.AttributeValue{
+			":status":     &types.AttributeValueMemberS{Value: string(status)},
+			":updated_at": &types.AttributeValueMemberS{Value: time.Now().UTC().Format(time.RFC3339)},
+		},
+	})
+	return err
 }
 
 // Get fetches one job's status record. It returns (nil, nil) if no record

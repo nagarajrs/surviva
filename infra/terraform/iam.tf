@@ -86,12 +86,6 @@ data "aws_iam_policy_document" "state_machine" {
   }
 
   statement {
-    sid       = "MarkJobsRestored"
-    actions   = ["dynamodb:UpdateItem"]
-    resources = [aws_dynamodb_table.jobs.arn]
-  }
-
-  statement {
     sid     = "LaunchAndInspectReplacementInstance"
     actions = ["ec2:RunInstances", "ec2:DescribeInstances", "ec2:DescribeVolumes", "ec2:AttachVolume"]
     # RunInstances/AttachVolume don't support restricting to a single

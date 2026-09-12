@@ -9,6 +9,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
@@ -103,6 +104,96 @@ func tarGzDir(dir string, w io.Writer) error {
 		return fmt.Errorf("close gzip writer: %w", err)
 	}
 	return nil
+}
+
+// PullFromURI downloads and extracts the gzipped tarball at an s3:// URI
+// (as recorded by StatusStore.Complete) into destDir. It takes the URI
+// rather than a bucket/prefix pair since a restore only ever needs the one
+// object already named in the job's record.
+func PullFromURI(ctx context.Context, cfg aws.Config, s3URI, destDir string) error {
+	bucket, key, err := parseS3URI(s3URI)
+	if err != nil {
+		return err
+	}
+
+	client := s3.NewFromConfig(cfg)
+	out, err := client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		return fmt.Errorf("download %s: %w", s3URI, err)
+	}
+	defer out.Body.Close()
+
+	if err := untarGz(out.Body, destDir); err != nil {
+		return fmt.Errorf("extract %s: %w", s3URI, err)
+	}
+	return nil
+}
+
+func parseS3URI(uri string) (bucket, key string, err error) {
+	const prefix = "s3://"
+	if !strings.HasPrefix(uri, prefix) {
+		return "", "", fmt.Errorf("not an s3:// uri: %s", uri)
+	}
+	rest := uri[len(prefix):]
+	idx := strings.IndexByte(rest, '/')
+	if idx < 0 {
+		return "", "", fmt.Errorf("s3 uri missing object key: %s", uri)
+	}
+	return rest[:idx], rest[idx+1:], nil
+}
+
+func untarGz(r io.Reader, destDir string) error {
+	if err := os.MkdirAll(destDir, 0o700); err != nil {
+		return fmt.Errorf("create %s: %w", destDir, err)
+	}
+
+	gz, err := gzip.NewReader(r)
+	if err != nil {
+		return fmt.Errorf("open gzip stream: %w", err)
+	}
+	defer gz.Close()
+
+	tr := tar.NewReader(gz)
+	cleanDest := filepath.Clean(destDir)
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("read tar entry: %w", err)
+		}
+
+		target := filepath.Join(destDir, hdr.Name)
+		if target != cleanDest && !strings.HasPrefix(target, cleanDest+string(os.PathSeparator)) {
+			return fmt.Errorf("tar entry %q escapes destination directory", hdr.Name)
+		}
+
+		switch hdr.Typeflag {
+		case tar.TypeDir:
+			if err := os.MkdirAll(target, 0o700); err != nil {
+				return err
+			}
+		case tar.TypeReg:
+			if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
+				return err
+			}
+			f, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.FileMode(hdr.Mode))
+			if err != nil {
+				return err
+			}
+			if _, err := io.Copy(f, tr); err != nil {
+				f.Close()
+				return err
+			}
+			if err := f.Close(); err != nil {
+				return err
+			}
+		}
+	}
 }
 
 type countingWriter struct {

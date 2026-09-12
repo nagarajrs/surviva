@@ -21,6 +21,8 @@ func main() {
 		code = daemonCmd(os.Args[2:])
 	case "list":
 		code = listCmd(os.Args[2:])
+	case "restore":
+		code = restoreCmd(os.Args[2:])
 	case "-h", "--help", "help":
 		printUsage()
 		code = 0
@@ -39,6 +41,7 @@ Usage:
   surviva run [flags] -- <command> [args...]   Run and track a command
   surviva daemon [flags]                       Run the surviva daemon
   surviva list [flags]                         List jobs tracked by the daemon
+  surviva restore [flags] <job-id>             Restore a checkpointed job on this instance
 
 Run 'surviva <command> -h' for flags on a specific subcommand.
 `)
