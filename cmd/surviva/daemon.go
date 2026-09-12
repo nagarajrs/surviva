@@ -19,9 +19,16 @@ func daemonCmd(args []string) int {
 	fs := flag.NewFlagSet("daemon", flag.ExitOnError)
 	socketPath := fs.String("socket", ipc.DefaultSocketPath(), "path to listen on")
 	dbPath := fs.String("db", ipc.DefaultDBPath(), "path to the sqlite job database")
+	checkpointDir := fs.String("checkpoint-dir", ipc.DefaultCheckpointDir(), "directory to write local checkpoint images under")
+	enableIMDS := fs.Bool("imds", true, "poll IMDS for Spot rebalance/interruption signals (disable only for local development off-EC2)")
 	_ = fs.Parse(args)
 
-	d, err := daemon.New(*socketPath, *dbPath)
+	d, err := daemon.New(daemon.Config{
+		SocketPath:    *socketPath,
+		DBPath:        *dbPath,
+		CheckpointDir: *checkpointDir,
+		EnableIMDS:    *enableIMDS,
+	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "surviva daemon: %v\n", err)
 		return 1

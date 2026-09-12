@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 
+	"surviva/internal/fdguard"
 	"surviva/internal/ipc"
 	"surviva/internal/procattr"
 )
@@ -42,6 +43,11 @@ func runCmd(args []string) int {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.SysProcAttr = procattr.New()
+
+	// Any fd this process happens to have inherited (e.g. a stray pty from
+	// an enclosing shell) must not leak into the tracked child: it can
+	// silently break CRIU dump/restore later.
+	fdguard.CloseInherited()
 
 	if err := cmd.Start(); err != nil {
 		fmt.Fprintf(os.Stderr, "surviva run: failed to start %q: %v\n", cmdArgs[0], err)

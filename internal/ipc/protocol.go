@@ -72,3 +72,16 @@ func DefaultDBPath() string {
 	}
 	return "/var/lib/surviva/jobs.db"
 }
+
+// DefaultCheckpointDir returns the local directory checkpoint images are
+// written under (one subdirectory per job id) unless overridden by
+// SURVIVA_CHECKPOINT_DIR.
+func DefaultCheckpointDir() string {
+	if p := os.Getenv("SURVIVA_CHECKPOINT_DIR"); p != "" {
+		return p
+	}
+	if runtime.GOOS == "windows" {
+		return filepath.Join(os.TempDir(), "surviva-checkpoints")
+	}
+	return "/var/lib/surviva/checkpoints"
+}
