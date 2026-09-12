@@ -39,8 +39,11 @@ data "aws_iam_policy_document" "instance" {
   dynamic "statement" {
     for_each = var.enable_s3_bucket ? [1] : []
     content {
-      sid       = "PushCheckpointsToS3"
-      actions   = ["s3:PutObject"]
+      sid = "PushAndPullCheckpointsToS3"
+      # PutObject for the daemon's checkpoint push; GetObject for `surviva
+      # restore` pulling it back down — the same instance role/profile is
+      # used by both the original instance and its replacement.
+      actions   = ["s3:PutObject", "s3:GetObject"]
       resources = ["${aws_s3_bucket.checkpoints[0].arn}/*"]
     }
   }
