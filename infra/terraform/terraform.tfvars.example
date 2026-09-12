@@ -1,0 +1,22 @@
+# Copy to terraform.tfvars and fill in for your environment.
+
+aws_region = "us-east-1"
+
+# The launch template your Spot fleet's instances (and their replacements)
+# are launched from. Every job checkpointed to EBS assumes the replacement
+# instance comes from the same launch template, so its AMI/kernel matches
+# well enough for CRIU restore to work.
+launch_template_id      = "lt-xxxxxxxxxxxxxxxxx"
+launch_template_version = "$Latest"
+
+# Only needed if any job uses EBS checkpoint storage: maps each AZ your
+# fleet runs in to a subnet in that AZ, so the replacement instance can be
+# pinned to the same AZ as the checkpoint volume (EBS volumes can't cross
+# AZs). Leave {} if every job uses S3 storage only.
+az_subnet_map = {
+  # "us-east-1a" = "subnet-xxxxxxxxxxxxxxxxx"
+}
+
+enable_s3_bucket = false # set true if any job uses S3 checkpoint storage
+
+name_prefix = "surviva"
