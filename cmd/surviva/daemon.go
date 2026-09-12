@@ -23,6 +23,10 @@ func daemonCmd(args []string) int {
 	checkpointDir := fs.String("checkpoint-dir", ipc.DefaultCheckpointDir(), "directory to write local checkpoint images under")
 	enableIMDS := fs.Bool("imds", true, "poll IMDS for Spot rebalance/interruption signals (disable only for local development off-EC2)")
 	maxConcurrentCheckpoints := fs.Int("max-concurrent-checkpoints", runtime.NumCPU(), "maximum number of jobs to checkpoint at once (defaults to CPU count; large checkpoints can saturate disk/CPU if this is set too high)")
+	s3Bucket := fs.String("s3-bucket", "", "S3 bucket to push checkpoints to for durability (requires -dynamodb-table too; leave both unset to keep checkpoints local-disk-only)")
+	s3Prefix := fs.String("s3-prefix", "checkpoints", "key prefix under -s3-bucket to store checkpoint tarballs")
+	dynamoDBTable := fs.String("dynamodb-table", "", "DynamoDB table to record checkpoint status in (requires -s3-bucket too)")
+	awsRegion := fs.String("aws-region", "", "AWS region override (defaults to the normal environment/instance region resolution)")
 	_ = fs.Parse(args)
 
 	d, err := daemon.New(daemon.Config{
@@ -31,6 +35,10 @@ func daemonCmd(args []string) int {
 		CheckpointDir:            *checkpointDir,
 		EnableIMDS:               *enableIMDS,
 		MaxConcurrentCheckpoints: *maxConcurrentCheckpoints,
+		S3Bucket:                 *s3Bucket,
+		S3Prefix:                 *s3Prefix,
+		DynamoDBTable:            *dynamoDBTable,
+		AWSRegion:                *awsRegion,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "surviva daemon: %v\n", err)

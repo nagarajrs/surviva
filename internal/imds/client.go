@@ -18,9 +18,11 @@ const (
 	tokenTTL         = 6 * time.Hour
 	tokenRefreshSlop = 30 * time.Second
 
-	pathToken               = "/latest/api/token"
-	pathRebalanceRecommend  = "/latest/meta-data/events/recommendations/rebalance"
-	pathSpotInstanceAction  = "/latest/meta-data/spot/instance-action"
+	pathToken              = "/latest/api/token"
+	pathRebalanceRecommend = "/latest/meta-data/events/recommendations/rebalance"
+	pathSpotInstanceAction = "/latest/meta-data/spot/instance-action"
+	pathInstanceID         = "/latest/meta-data/instance-id"
+	pathAvailabilityZone   = "/latest/meta-data/placement/availability-zone"
 )
 
 // Client is an IMDSv2 client with automatic token refresh.
@@ -156,4 +158,29 @@ func (c *Client) SpotInstanceAction(ctx context.Context) (*InstanceAction, error
 		return nil, fmt.Errorf("parse instance action: %w", err)
 	}
 	return &ia, nil
+}
+
+// InstanceID returns this instance's id, for tagging checkpoint records.
+func (c *Client) InstanceID(ctx context.Context) (string, error) {
+	found, body, err := c.get(ctx, pathInstanceID)
+	if err != nil {
+		return "", err
+	}
+	if !found {
+		return "", fmt.Errorf("instance-id not present in IMDS")
+	}
+	return string(body), nil
+}
+
+// AvailabilityZone returns this instance's AZ, for tagging checkpoint
+// records (an EBS checkpoint volume can only be attached within its AZ).
+func (c *Client) AvailabilityZone(ctx context.Context) (string, error) {
+	found, body, err := c.get(ctx, pathAvailabilityZone)
+	if err != nil {
+		return "", err
+	}
+	if !found {
+		return "", fmt.Errorf("availability-zone not present in IMDS")
+	}
+	return string(body), nil
 }

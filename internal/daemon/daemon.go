@@ -15,11 +15,14 @@ import (
 	"sync"
 	"time"
 
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+
 	"surviva/internal/checkpoint"
 	"surviva/internal/idgen"
 	"surviva/internal/imds"
 	"surviva/internal/ipc"
 	"surviva/internal/job"
+	"surviva/internal/remote"
 	"surviva/internal/store"
 )
 
@@ -41,6 +44,17 @@ type Config struct {
 	// interruption window, so concurrency is capped rather than
 	// unbounded. Defaults to 1 (sequential) if <= 0.
 	MaxConcurrentCheckpoints int
+	// S3Bucket and DynamoDBTable enable durable remote storage: a local
+	// checkpoint is only considered complete once it has also been pushed
+	// to S3 and recorded in DynamoDB. Both must be set to enable this;
+	// leaving either empty keeps checkpoints local-disk-only (as in
+	// earlier phases).
+	S3Bucket      string
+	S3Prefix      string
+	DynamoDBTable string
+	// AWSRegion overrides the AWS SDK's default region resolution.
+	// Leave empty to use the environment/instance's normal region config.
+	AWSRegion string
 }
 
 // Daemon owns the job store, the socket clients connect to, and (when
@@ -50,7 +64,10 @@ type Daemon struct {
 	socketPath               string
 	checkpointDir            string
 	poller                   *imds.Poller
+	imdsClient               *imds.Client
 	maxConcurrentCheckpoints int
+	statusStore              *remote.StatusStore
+	objectStore              *remote.ObjectStore
 }
 
 // New opens the job store and prepares a daemon to listen on cfg.SocketPath,
@@ -84,7 +101,8 @@ func New(cfg Config) (*Daemon, error) {
 	}
 
 	if cfg.EnableIMDS {
-		d.poller = imds.NewPoller(imds.NewClient())
+		d.imdsClient = imds.NewClient()
+		d.poller = imds.NewPoller(d.imdsClient)
 		d.poller.OnRebalanceRecommendation = func(*imds.RebalanceRecommendation) {
 			d.handleInterruption("rebalance-recommendation")
 		}
@@ -93,7 +111,27 @@ func New(cfg Config) (*Daemon, error) {
 		}
 	}
 
+	if cfg.S3Bucket != "" && cfg.DynamoDBTable != "" {
+		awsCfgOpts := []func(*awsconfig.LoadOptions) error{}
+		if cfg.AWSRegion != "" {
+			awsCfgOpts = append(awsCfgOpts, awsconfig.WithRegion(cfg.AWSRegion))
+		}
+		awsCfg, err := awsconfig.LoadDefaultConfig(context.Background(), awsCfgOpts...)
+		if err != nil {
+			return nil, fmt.Errorf("load AWS config: %w", err)
+		}
+		d.objectStore = remote.NewObjectStore(awsCfg, cfg.S3Bucket, cfg.S3Prefix)
+		d.statusStore = remote.NewStatusStore(awsCfg, cfg.DynamoDBTable)
+	}
+
 	return d, nil
+}
+
+// remoteEnabled reports whether checkpoints are pushed to durable remote
+// storage (S3 + DynamoDB) rather than being considered complete once
+// they're only on local disk.
+func (d *Daemon) remoteEnabled() bool {
+	return d.objectStore != nil && d.statusStore != nil
 }
 
 // Run listens for client connections and (if enabled) polls IMDS, until ctx
@@ -276,9 +314,72 @@ func (d *Daemon) checkpointJob(j job.Job) {
 		}
 		return
 	}
+	log.Printf("checkpoint: job %s dumped locally (%s)", j.ID, checkpoint.Dir(d.checkpointDir, j.ID))
 
-	log.Printf("checkpoint: job %s complete (%s)", j.ID, checkpoint.Dir(d.checkpointDir, j.ID))
+	// "Complete" means durably stored, not just dumped to local disk: when
+	// remote storage is configured, the local status only advances to
+	// CHECKPOINT_COMPLETE once the push to S3 (recorded in DynamoDB
+	// independent of this instance) has actually succeeded.
+	if d.remoteEnabled() {
+		if err := d.pushRemote(ctx, j); err != nil {
+			log.Printf("checkpoint: job %s: remote push FAILED: %v", j.ID, err)
+			if err := d.store.UpdateStatus(j.ID, job.StatusFailed); err != nil {
+				log.Printf("checkpoint: job %s: failed to update status: %v", j.ID, err)
+			}
+			return
+		}
+	}
+
+	log.Printf("checkpoint: job %s complete", j.ID)
 	if err := d.store.UpdateStatus(j.ID, job.StatusCheckpointComplete); err != nil {
 		log.Printf("checkpoint: job %s: failed to update status: %v", j.ID, err)
 	}
+}
+
+// pushRemote uploads a locally-dumped checkpoint to S3 and records its
+// status in DynamoDB. It writes an IN_PROGRESS record before the (possibly
+// slow, possibly large) upload starts, so that if the instance dies
+// mid-upload the table is left showing IN_PROGRESS/INCOMPLETE rather than
+// nothing — an orchestrator must never restore from anything but a
+// CHECKPOINT_COMPLETE record.
+func (d *Daemon) pushRemote(ctx context.Context, j job.Job) error {
+	method := "criu"
+	if j.HookCheckpoint != "" {
+		method = "hook"
+	}
+
+	var instanceID, az string
+	if d.imdsClient != nil {
+		instanceID, _ = d.imdsClient.InstanceID(ctx)
+		az, _ = d.imdsClient.AvailabilityZone(ctx)
+	}
+
+	rec := remote.Record{
+		JobID:            j.ID,
+		InstanceID:       instanceID,
+		AZ:               az,
+		Command:          j.Command,
+		Priority:         j.Priority,
+		CheckpointMethod: method,
+		StorageType:      "s3",
+		Status:           string(job.StatusCheckpointInProgress),
+		UpdatedAt:        time.Now().UTC(),
+	}
+	if err := d.statusStore.Put(ctx, rec); err != nil {
+		return fmt.Errorf("write initial remote status: %w", err)
+	}
+
+	size, err := d.objectStore.PushDir(ctx, j.ID, checkpoint.Dir(d.checkpointDir, j.ID))
+	if err != nil {
+		if failErr := d.statusStore.Fail(ctx, j.ID, err.Error()); failErr != nil {
+			log.Printf("checkpoint: job %s: failed to mark remote status incomplete: %v", j.ID, failErr)
+		}
+		return err
+	}
+
+	if err := d.statusStore.Complete(ctx, j.ID, d.objectStore.URI(j.ID), size); err != nil {
+		return fmt.Errorf("mark remote status complete: %w", err)
+	}
+	log.Printf("checkpoint: job %s pushed to %s (%d bytes)", j.ID, d.objectStore.URI(j.ID), size)
+	return nil
 }
