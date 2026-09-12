@@ -44,13 +44,22 @@ type Config struct {
 	// interruption window, so concurrency is capped rather than
 	// unbounded. Defaults to 1 (sequential) if <= 0.
 	MaxConcurrentCheckpoints int
-	// S3Bucket and DynamoDBTable enable durable remote storage: a local
-	// checkpoint is only considered complete once it has also been pushed
-	// to S3 and recorded in DynamoDB. Both must be set to enable this;
-	// leaving either empty keeps checkpoints local-disk-only (as in
-	// earlier phases).
-	S3Bucket      string
-	S3Prefix      string
+	// S3Bucket and DynamoDBTable enable durable remote storage via S3: a
+	// local checkpoint is only considered complete once it has also been
+	// pushed to S3 and recorded in DynamoDB. Both must be set together.
+	S3Bucket string
+	S3Prefix string
+	// EBSVolumeID enables durable remote storage via EBS instead of S3:
+	// CheckpointDir is expected to already be on this volume, which must
+	// be attached to this instance with DeleteOnTermination=false (checked
+	// at startup — surviva refuses to start otherwise, since a volume that
+	// would be deleted along with the instance defeats the entire point).
+	// Requires DynamoDBTable too; mutually exclusive with S3Bucket.
+	EBSVolumeID string
+	// DynamoDBTable records checkpoint durability status independent of
+	// this instance's own disks. Required by both S3Bucket and
+	// EBSVolumeID; leaving all three unset keeps checkpoints
+	// local-disk-only (as in earlier phases).
 	DynamoDBTable string
 	// AWSRegion overrides the AWS SDK's default region resolution.
 	// Leave empty to use the environment/instance's normal region config.
@@ -68,6 +77,7 @@ type Daemon struct {
 	maxConcurrentCheckpoints int
 	statusStore              *remote.StatusStore
 	objectStore              *remote.ObjectStore
+	ebsVolumeID              string
 }
 
 // New opens the job store and prepares a daemon to listen on cfg.SocketPath,
@@ -111,7 +121,19 @@ func New(cfg Config) (*Daemon, error) {
 		}
 	}
 
-	if cfg.S3Bucket != "" && cfg.DynamoDBTable != "" {
+	hasS3 := cfg.S3Bucket != ""
+	hasEBS := cfg.EBSVolumeID != ""
+	hasTable := cfg.DynamoDBTable != ""
+	switch {
+	case hasS3 && hasEBS:
+		return nil, fmt.Errorf("configure at most one of -s3-bucket or -ebs-volume-id, not both")
+	case (hasS3 || hasEBS) && !hasTable:
+		return nil, fmt.Errorf("-dynamodb-table is required when -s3-bucket or -ebs-volume-id is set")
+	case hasTable && !hasS3 && !hasEBS:
+		return nil, fmt.Errorf("-dynamodb-table requires either -s3-bucket or -ebs-volume-id to be set")
+	}
+
+	if hasTable {
 		awsCfgOpts := []func(*awsconfig.LoadOptions) error{}
 		if cfg.AWSRegion != "" {
 			awsCfgOpts = append(awsCfgOpts, awsconfig.WithRegion(cfg.AWSRegion))
@@ -120,18 +142,32 @@ func New(cfg Config) (*Daemon, error) {
 		if err != nil {
 			return nil, fmt.Errorf("load AWS config: %w", err)
 		}
-		d.objectStore = remote.NewObjectStore(awsCfg, cfg.S3Bucket, cfg.S3Prefix)
 		d.statusStore = remote.NewStatusStore(awsCfg, cfg.DynamoDBTable)
+
+		if hasS3 {
+			d.objectStore = remote.NewObjectStore(awsCfg, cfg.S3Bucket, cfg.S3Prefix)
+		}
+
+		if hasEBS {
+			var instanceID string
+			if d.imdsClient != nil {
+				instanceID, _ = d.imdsClient.InstanceID(context.Background())
+			}
+			if err := remote.ValidateEBSVolume(context.Background(), awsCfg, cfg.EBSVolumeID, instanceID); err != nil {
+				return nil, fmt.Errorf("EBS checkpoint volume validation failed: %w", err)
+			}
+			d.ebsVolumeID = cfg.EBSVolumeID
+		}
 	}
 
 	return d, nil
 }
 
-// remoteEnabled reports whether checkpoints are pushed to durable remote
-// storage (S3 + DynamoDB) rather than being considered complete once
-// they're only on local disk.
+// remoteEnabled reports whether checkpoints are tracked in durable remote
+// storage (DynamoDB, plus S3 or a validated EBS volume) rather than being
+// considered complete once they're only on local disk.
 func (d *Daemon) remoteEnabled() bool {
-	return d.objectStore != nil && d.statusStore != nil
+	return d.statusStore != nil
 }
 
 // Run listens for client connections and (if enabled) polls IMDS, until ctx
@@ -307,8 +343,23 @@ func (d *Daemon) checkpointJob(j job.Job) {
 	ctx, cancel := context.WithTimeout(context.Background(), checkpointTimeout)
 	defer cancel()
 
+	// In EBS mode the local dump writes directly to the EBS-backed
+	// checkpoint disk, so the dump itself is the durable step that could
+	// be interrupted — write the IN_PROGRESS record before it starts, the
+	// same way the S3 path writes one before its upload starts.
+	if d.ebsVolumeID != "" {
+		if err := d.recordEBSStart(ctx, j); err != nil {
+			log.Printf("checkpoint: job %s: %v", j.ID, err)
+		}
+	}
+
 	if err := checkpoint.Run(ctx, d.checkpointDir, j); err != nil {
 		log.Printf("checkpoint: job %s FAILED: %v", j.ID, err)
+		if d.ebsVolumeID != "" {
+			if failErr := d.statusStore.Fail(ctx, j.ID, err.Error()); failErr != nil {
+				log.Printf("checkpoint: job %s: failed to mark remote status incomplete: %v", j.ID, failErr)
+			}
+		}
 		if err := d.store.UpdateStatus(j.ID, job.StatusFailed); err != nil {
 			log.Printf("checkpoint: job %s: failed to update status: %v", j.ID, err)
 		}
@@ -316,11 +367,20 @@ func (d *Daemon) checkpointJob(j job.Job) {
 	}
 	log.Printf("checkpoint: job %s dumped locally (%s)", j.ID, checkpoint.Dir(d.checkpointDir, j.ID))
 
-	// "Complete" means durably stored, not just dumped to local disk: when
-	// remote storage is configured, the local status only advances to
-	// CHECKPOINT_COMPLETE once the push to S3 (recorded in DynamoDB
-	// independent of this instance) has actually succeeded.
-	if d.remoteEnabled() {
+	// "Complete" means durably stored, not just dumped to local disk.
+	switch {
+	case d.ebsVolumeID != "":
+		dir := checkpoint.Dir(d.checkpointDir, j.ID)
+		if err := d.statusStore.CompleteEBS(ctx, j.ID, d.ebsVolumeID, dir); err != nil {
+			log.Printf("checkpoint: job %s: %v", j.ID, err)
+			if err := d.store.UpdateStatus(j.ID, job.StatusFailed); err != nil {
+				log.Printf("checkpoint: job %s: failed to update status: %v", j.ID, err)
+			}
+			return
+		}
+		log.Printf("checkpoint: job %s durable on EBS volume %s", j.ID, d.ebsVolumeID)
+
+	case d.remoteEnabled(): // S3 mode
 		if err := d.pushRemote(ctx, j); err != nil {
 			log.Printf("checkpoint: job %s: remote push FAILED: %v", j.ID, err)
 			if err := d.store.UpdateStatus(j.ID, job.StatusFailed); err != nil {
@@ -336,13 +396,10 @@ func (d *Daemon) checkpointJob(j job.Job) {
 	}
 }
 
-// pushRemote uploads a locally-dumped checkpoint to S3 and records its
-// status in DynamoDB. It writes an IN_PROGRESS record before the (possibly
-// slow, possibly large) upload starts, so that if the instance dies
-// mid-upload the table is left showing IN_PROGRESS/INCOMPLETE rather than
-// nothing — an orchestrator must never restore from anything but a
-// CHECKPOINT_COMPLETE record.
-func (d *Daemon) pushRemote(ctx context.Context, j job.Job) error {
+// baseRecord builds a DynamoDB record's common fields for a job about to be
+// checkpointed to storageType ("s3" or "ebs"), tagging it with this
+// instance's id/AZ when IMDS is available (best-effort — empty off-EC2).
+func (d *Daemon) baseRecord(ctx context.Context, j job.Job, storageType string) remote.Record {
 	method := "criu"
 	if j.HookCheckpoint != "" {
 		method = "hook"
@@ -354,17 +411,38 @@ func (d *Daemon) pushRemote(ctx context.Context, j job.Job) error {
 		az, _ = d.imdsClient.AvailabilityZone(ctx)
 	}
 
-	rec := remote.Record{
+	return remote.Record{
 		JobID:            j.ID,
 		InstanceID:       instanceID,
 		AZ:               az,
 		Command:          j.Command,
 		Priority:         j.Priority,
 		CheckpointMethod: method,
-		StorageType:      "s3",
+		StorageType:      storageType,
 		Status:           string(job.StatusCheckpointInProgress),
 		UpdatedAt:        time.Now().UTC(),
 	}
+}
+
+// recordEBSStart writes the initial DynamoDB record for a job about to be
+// checkpointed to the configured EBS volume.
+func (d *Daemon) recordEBSStart(ctx context.Context, j job.Job) error {
+	rec := d.baseRecord(ctx, j, "ebs")
+	rec.EBSVolumeID = d.ebsVolumeID
+	if err := d.statusStore.Put(ctx, rec); err != nil {
+		return fmt.Errorf("write initial remote status: %w", err)
+	}
+	return nil
+}
+
+// pushRemote uploads a locally-dumped checkpoint to S3 and records its
+// status in DynamoDB. It writes an IN_PROGRESS record before the (possibly
+// slow, possibly large) upload starts, so that if the instance dies
+// mid-upload the table is left showing IN_PROGRESS/INCOMPLETE rather than
+// nothing — an orchestrator must never restore from anything but a
+// CHECKPOINT_COMPLETE record.
+func (d *Daemon) pushRemote(ctx context.Context, j job.Job) error {
+	rec := d.baseRecord(ctx, j, "s3")
 	if err := d.statusStore.Put(ctx, rec); err != nil {
 		return fmt.Errorf("write initial remote status: %w", err)
 	}

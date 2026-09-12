@@ -28,6 +28,8 @@ type Record struct {
 	StorageType      string    `dynamodbav:"storage_type"`      // "s3" | "ebs"
 	S3URI            string    `dynamodbav:"s3_uri,omitempty"`
 	SizeBytes        int64     `dynamodbav:"size_bytes,omitempty"`
+	EBSVolumeID      string    `dynamodbav:"ebs_volume_id,omitempty"`
+	EBSPath          string    `dynamodbav:"ebs_path,omitempty"` // directory within the volume holding the checkpoint images
 	Status           string    `dynamodbav:"status"`
 	FailureReason    string    `dynamodbav:"failure_reason,omitempty"`
 	UpdatedAt        time.Time `dynamodbav:"updated_at"`
@@ -85,6 +87,34 @@ func (s *StatusStore) Complete(ctx context.Context, jobID, s3URI string, sizeByt
 	})
 	if err != nil {
 		return fmt.Errorf("mark job %s complete: %w", jobID, err)
+	}
+	return nil
+}
+
+// CompleteEBS marks a job's checkpoint as durably stored on volumeID, at
+// path within that volume. Unlike the S3 path, there is no separate
+// upload: the local checkpoint dump itself (already on the EBS-backed
+// disk) is the durable write, so this is called right after that dump
+// succeeds.
+func (s *StatusStore) CompleteEBS(ctx context.Context, jobID, volumeID, path string) error {
+	_, err := s.client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+		TableName: aws.String(s.tableName),
+		Key: map[string]types.AttributeValue{
+			"job_id": &types.AttributeValueMemberS{Value: jobID},
+		},
+		UpdateExpression: aws.String("SET #status = :status, ebs_volume_id = :volume_id, ebs_path = :path, updated_at = :updated_at"),
+		ExpressionAttributeNames: map[string]string{
+			"#status": "status",
+		},
+		ExpressionAttributeValues: map[string]types.AttributeValue{
+			":status":     &types.AttributeValueMemberS{Value: string(job.StatusCheckpointComplete)},
+			":volume_id":  &types.AttributeValueMemberS{Value: volumeID},
+			":path":       &types.AttributeValueMemberS{Value: path},
+			":updated_at": &types.AttributeValueMemberS{Value: time.Now().UTC().Format(time.RFC3339)},
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("mark job %s complete (ebs): %w", jobID, err)
 	}
 	return nil
 }
