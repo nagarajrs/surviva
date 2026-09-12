@@ -12,6 +12,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"surviva/internal/checkpoint"
@@ -22,9 +23,8 @@ import (
 	"surviva/internal/store"
 )
 
-// checkpointTimeout bounds a single job's checkpoint attempt. Jobs are
-// checkpointed sequentially in this phase, all within the Spot interruption
-// notice's ~2-minute window; parallel checkpointing lands in a later phase.
+// checkpointTimeout bounds a single job's checkpoint attempt, all within
+// the Spot interruption notice's ~2-minute window.
 const checkpointTimeout = 100 * time.Second
 
 // Config configures a Daemon.
@@ -35,15 +35,22 @@ type Config struct {
 	// EnableIMDS controls whether the daemon polls IMDS for Spot signals.
 	// Disabling it is only useful off-EC2 (local development).
 	EnableIMDS bool
+	// MaxConcurrentCheckpoints bounds how many jobs are checkpointed at
+	// once. Dumping many large process trees fully in parallel can
+	// saturate disk/CPU badly enough that none finish inside the
+	// interruption window, so concurrency is capped rather than
+	// unbounded. Defaults to 1 (sequential) if <= 0.
+	MaxConcurrentCheckpoints int
 }
 
 // Daemon owns the job store, the socket clients connect to, and (when
 // enabled) the IMDS poller that triggers checkpointing.
 type Daemon struct {
-	store         *store.Store
-	socketPath    string
-	checkpointDir string
-	poller        *imds.Poller
+	store                    *store.Store
+	socketPath               string
+	checkpointDir            string
+	poller                   *imds.Poller
+	maxConcurrentCheckpoints int
 }
 
 // New opens the job store and prepares a daemon to listen on cfg.SocketPath,
@@ -64,7 +71,17 @@ func New(cfg Config) (*Daemon, error) {
 		return nil, err
 	}
 
-	d := &Daemon{store: st, socketPath: cfg.SocketPath, checkpointDir: cfg.CheckpointDir}
+	maxConcurrent := cfg.MaxConcurrentCheckpoints
+	if maxConcurrent <= 0 {
+		maxConcurrent = 1
+	}
+
+	d := &Daemon{
+		store:                    st,
+		socketPath:               cfg.SocketPath,
+		checkpointDir:            cfg.CheckpointDir,
+		maxConcurrentCheckpoints: maxConcurrent,
+	}
 
 	if cfg.EnableIMDS {
 		d.poller = imds.NewPoller(imds.NewClient())
@@ -195,29 +212,53 @@ func (d *Daemon) dispatch(req ipc.Request) ipc.Response {
 	}
 }
 
-// handleInterruption checkpoints every tracked job, sequentially, in
-// response to an IMDS signal. It is called at most once per signal type per
-// daemon run (see imds.Poller) but a rebalance recommendation followed by an
-// actual interruption notice would call it twice; jobs already past
-// StatusRunning are skipped so the second call is a no-op.
+// handleInterruption checkpoints every tracked job in response to an IMDS
+// signal, up to maxConcurrentCheckpoints at once. It is called at most once
+// per signal type per daemon run (see imds.Poller) but a rebalance
+// recommendation followed by an actual interruption notice would call it
+// twice; jobs already past StatusRunning are skipped so the second call is
+// a no-op.
+//
+// store.List returns jobs highest-priority first, and that order is
+// preserved when handing work to the bounded pool of workers below: with
+// concurrency capped below the number of runnable jobs, higher-priority
+// jobs claim a worker slot first and lower-priority ones queue behind them,
+// so priority determines who gets checkpointed first if time runs out
+// mid-way rather than which goroutine happens to be scheduled first.
 func (d *Daemon) handleInterruption(trigger string) {
 	jobs, err := d.store.List()
 	if err != nil {
 		log.Printf("checkpoint: failed to list jobs (trigger=%s): %v", trigger, err)
 		return
 	}
-	if len(jobs) == 0 {
+
+	runnable := jobs[:0]
+	for _, j := range jobs {
+		if j.Status == job.StatusRunning {
+			runnable = append(runnable, j)
+		}
+	}
+	if len(runnable) == 0 {
 		log.Printf("checkpoint: %s received, no tracked jobs", trigger)
 		return
 	}
 
-	log.Printf("checkpoint: %s received, checkpointing %d job(s)", trigger, len(jobs))
-	for _, j := range jobs {
-		if j.Status != job.StatusRunning {
-			continue
-		}
-		d.checkpointJob(j)
+	log.Printf("checkpoint: %s received, checkpointing %d job(s) (max %d concurrent)", trigger, len(runnable), d.maxConcurrentCheckpoints)
+
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, d.maxConcurrentCheckpoints)
+	for _, j := range runnable {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(j job.Job) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			d.checkpointJob(j)
+		}(j)
 	}
+	wg.Wait()
+
+	log.Printf("checkpoint: %s complete: %d job(s) processed", trigger, len(runnable))
 }
 
 func (d *Daemon) checkpointJob(j job.Job) {
