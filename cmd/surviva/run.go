@@ -6,10 +6,13 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
+	"syscall"
 
 	"surviva/internal/fdguard"
 	"surviva/internal/ipc"
 	"surviva/internal/procattr"
+	"surviva/internal/procsignal"
 )
 
 // runCmd implements `surviva run [flags] -- <command> [args...]`: start the
@@ -57,6 +60,31 @@ func runCmd(args []string) int {
 	// Setpgid makes the child its own process group leader, so its PGID
 	// equals its PID; CRIU dumps the whole tree rooted there in a later phase.
 	pid := cmd.Process.Pid
+
+	// The child is in its own session (see internal/procattr) so that CRIU
+	// can dump/restore it without a controlling terminal -- but that also
+	// means the terminal's own Ctrl+C never reaches it: SIGINT only goes to
+	// the terminal's foreground process group, which is this wrapper
+	// process, not the child's separate one. Without forwarding something
+	// ourselves, Go's default handling kills this process outright on
+	// SIGINT, before cmd.Wait() ever returns, so the child runs on
+	// unattended and this job's daemon record is never deregistered.
+	//
+	// What gets forwarded is deliberately always SIGTERM, never the literal
+	// signal received: confirmed for real that a bash script backgrounded
+	// with `&` (exactly how a tracked child ends up running, session-wise)
+	// sets its own SIGINT/SIGQUIT disposition to ignored -- a POSIX rule
+	// for asynchronous commands, unrelated to surviva -- so forwarding
+	// SIGINT verbatim silently does nothing for a shell-script job. SIGTERM
+	// carries no such special-cased ignore and reliably terminates it.
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		for range sigCh {
+			_ = procsignal.KillGroup(pid, syscall.SIGTERM)
+		}
+	}()
+
 	client := ipc.NewClient(*socketPath)
 	jobID, regErr := client.Register(ipc.RegisterJob{
 		PID:            pid,
