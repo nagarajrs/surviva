@@ -95,3 +95,28 @@ Found the same way as limitation 16: the orchestrator's `AttachVolume` state can
 Ec2.Ec2Exception: vol-xxxxxxxx is already attached to an instance
 ```
 Mitigated with a bounded `Retry` on that state (`ErrorEquals: ["Ec2.Ec2Exception"]`, 10 attempts, 10s interval, 1.3x backoff — `templates/restore_orchestrator.asl.json.tftpl`); Step Functions' direct AWS SDK integrations don't expose a more specific error code than the service-level exception class, so the retry is necessarily broader than just this one transient condition, trading a slightly slower failure for a much higher success rate on the common case.
+
+## 18. A tracked command attached to an interactive terminal can't be checkpointed at all
+
+Found for real: a user ran `surviva run -- ./some-script.sh` directly in an interactive SSM/SSH session (not backgrounded), then triggered a real interruption. `criu dump` failed outright:
+```
+Error (criu/tty.c:410): tty: Found slave peer index 2 without correspond master peer
+Error (criu/cr-dump.c:2128): Dumping FAILED.
+```
+`surviva run` (`cmd/surviva/run.go`) wires the tracked child's stdin/stdout/stderr directly to its own (inherited from whatever invoked it); putting the child in its own session (`internal/procattr`) detaches it from a *controlling* terminal, but doesn't change what those fds actually point to. If they're still a live pty, CRIU refuses to dump it. Reproduced directly against a real instance, independent of surviva, with a plain `pty.spawn()`-backed process.
+
+Worse, in S3 storage mode this fails completely silently from the outside: `internal/daemon`'s `pushRemote` only writes anything to DynamoDB *after* the local dump succeeds (see limitation 19), so a dump failure here leaves no DynamoDB record and no S3 object at all -- indistinguishable from a job that was simply never tracked. There's no code-level fix (CRIU has no supported way to dump/restore an inherited live tty as a regular fd); the mitigation is operational: always redirect a tracked command's stdio away from an interactive terminal before it can be checkpointed, e.g. `nohup surviva run -- ./script.sh < /dev/null > /dev/null 2>&1 & disown`.
+
+## 19. S3 storage mode gives no visibility into a checkpoint that fails before the upload starts
+
+EBS mode writes an `IN_PROGRESS` DynamoDB record before its local dump even begins (`recordEBSStart`), specifically so a mid-dump failure is still visible as something other than silence. S3 mode's `pushRemote` has no equivalent: `baseRecord`/`Put` only happens after `checkpoint.Run` (the local CRIU dump) already succeeded. A dump failure in S3 mode -- for any reason, not just limitation 18's tty case -- leaves zero trace in DynamoDB. The orchestrator's `QueryJobs` step, and anyone inspecting the table, cannot distinguish "this job was never tracked" from "this job's checkpoint failed before upload." Matching EBS mode's early record write would close this gap but hasn't been done.
+
+## 20. Ctrl+C to a tracked command may not reach it, and a bash script child ignores SIGINT by default
+
+Two compounding issues, found together for real: a user pressed Ctrl+C on a tracked `./counter.sh`, intending to cancel it; the script ran to completion anyway, and `surviva list` kept showing it `RUNNING` long after the process had actually exited.
+
+First: the tracked child runs in its own session (`internal/procattr`), so a terminal's Ctrl+C (SIGINT) — delivered only to the terminal's foreground process group — reaches `surviva run` itself, never the child. Go's default action for an unhandled SIGINT terminates the receiving process immediately, so without a handler, `surviva run` died before `cmd.Wait()` could return and deregister the job, leaving the child running unattended and the daemon's record stuck at `RUNNING` forever (nothing else in the system reconciles a tracked PID against whether it's still actually alive).
+
+Second, confirmed by direct reproduction independent of surviva entirely: a bash script run as a backgrounded/asynchronous command (`cmd &` — which is exactly how a session-detached tracked child ends up running) sets its own SIGINT/SIGQUIT disposition to ignored. This is a documented POSIX shell rule, not a surviva or CRIU quirk — `kill -INT` against such a script's process group genuinely does nothing, while `kill -TERM` against the identical process terminates it immediately.
+
+Fixed in `cmd/surviva/run.go`: catches SIGINT/SIGTERM and forwards **SIGTERM** (never the literal signal received) to the child's process group (`internal/procsignal`). Verified for real: a tracked bash script now dies and is cleanly deregistered on SIGINT to the wrapper, matching what a user pressing Ctrl+C expects.

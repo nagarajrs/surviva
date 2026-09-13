@@ -46,6 +46,14 @@ The freeze-and-resume technology brings a program back using its *exact original
 
 Also found using the hands-on sandbox: when a job's saved snapshot lives on a separate disk, the replacement machine sometimes tries to attach that disk a little too soon — before AWS has finished detaching it from the machine that just got reclaimed. This is now handled by simply trying again a few times over roughly a minute or two, which comfortably covers the normal delay.
 
+## A program you're actively typing into can't be saved at all
+
+If you start a protected program directly in your own terminal session (rather than setting it running in the background) and it's still connected to that live terminal when an interruption happens, the freeze-and-save step fails outright — the underlying technology can't capture a program that's still hooked up to an interactive terminal window. Worse, this can fail completely silently: when checkpoints are being saved to cloud storage (rather than a separate disk), nothing gets recorded anywhere until the save actually succeeds, so a program that fails to save this way leaves no trace at all — it looks exactly like a program that was never being protected in the first place. The fix is simple: always start a protected program in the background, detached from your terminal (there's a standard way to do this — see the deployment guide), rather than running it directly in front of you.
+
+## Pressing Ctrl+C on a protected program might not actually stop it
+
+Two things compound here, both found through real testing. First, because a protected program is deliberately isolated from the terminal it started in (so it can be safely frozen and resumed on different hardware later), your terminal's Ctrl+C doesn't automatically reach it — it was only reaching surviva's own tracking wrapper, which does nothing to the actual program. Second, and unrelated to surviva: many programs (like shell scripts), when running in the background, are specifically designed by the underlying operating system to ignore Ctrl+C-style interruptions — this is standard, deliberate Unix behavior, not a bug. Together, this meant pressing Ctrl+C could silently do nothing, while surviva's own records kept insisting the program was still running long after you'd tried to stop it. This has been fixed — surviva now properly passes along a stronger "please stop" signal that isn't subject to that background-ignoring behavior, so Ctrl+C reliably stops the program again.
+
 ---
 
 For the deeper technical reasoning behind some of these tradeoffs, see the project's design-record document. For how the pieces fit together, see the architecture document.
