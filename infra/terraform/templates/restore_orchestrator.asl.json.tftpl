@@ -70,6 +70,11 @@
           "LaunchTemplateId": "${launch_template_id}",
           "Version": "${launch_template_version}"
         },
+%{ if replacement_market_type == "spot" ~}
+        "InstanceMarketOptions": {
+          "MarketType": "spot"
+        },
+%{ endif ~}
         "MinCount": 1,
         "MaxCount": 1,
         "SubnetId": "{% $lookup($azSubnetMap, $targetAz) %}"
@@ -87,6 +92,11 @@
           "LaunchTemplateId": "${launch_template_id}",
           "Version": "${launch_template_version}"
         },
+%{ if replacement_market_type == "spot" ~}
+        "InstanceMarketOptions": {
+          "MarketType": "spot"
+        },
+%{ endif ~}
         "MinCount": 1,
         "MaxCount": 1
       },

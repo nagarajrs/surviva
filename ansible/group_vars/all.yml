@@ -42,6 +42,14 @@ base_ami_name_filter: "al2023-ami-2023*-x86_64"
 create_fis_demo_template: true
 fis_interruption_delay: PT2M
 
+# "on-demand" (default): the orchestrator's replacement instance won't be
+# immediately Spot-interruptible again right after a restore, but also
+# permanently stops running on Spot going forward. "spot": keeps the cost
+# saving, at the risk of a repeated interruption/restore cycle -- set this
+# if you want to test that chain (e.g. fire FIS again against the
+# replacement itself).
+replacement_market_type: on-demand
+
 # Isolates this sandbox's Terraform state from infra/terraform's default
 # workspace (which may have its own, unrelated state).
 terraform_workspace: sandbox

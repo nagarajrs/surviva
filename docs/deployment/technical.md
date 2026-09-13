@@ -116,6 +116,7 @@ Key variables (see `terraform.tfvars.example` for the full set with descriptions
 | `enable_s3_bucket` | `true` if any job uses S3 checkpoint storage |
 | `checkpoint_wait_seconds` | default 110s; must be ≥ the daemon's per-job checkpoint timeout, or the orchestrator will query DynamoDB before checkpointing finishes |
 | `restore_ssm_document` | default `AWS-RunShellScript` |
+| `replacement_market_type` | default `"on-demand"` — the replacement instance no longer runs on Spot after its first restore, but also isn't immediately re-interruptible; set `"spot"` to keep the cost saving and accept the risk of a repeated interruption/restore cycle |
 
 ## 3. Create the launch template
 

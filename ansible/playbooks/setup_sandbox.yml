@@ -137,6 +137,7 @@
           az_subnet_map: "{{ az_subnet_map }}"
           enable_s3_bucket: "{{ storage_mode == 's3' }}"
           create_fis_demo_template: false
+          replacement_market_type: "{{ replacement_market_type }}"
 
     - name: "Terraform: re-read outputs (checkpoint bucket/table names now final)"
       ansible.builtin.include_role:
@@ -166,6 +167,7 @@
           create_fis_demo_template: true
           fis_target_instance_arn: "{{ _sandbox_instance_arn }}"
           fis_interruption_delay: "{{ fis_interruption_delay }}"
+          replacement_market_type: "{{ replacement_market_type }}"
       when: create_fis_demo_template
 
     - name: "Terraform: final read of outputs (FIS template id, if created)"

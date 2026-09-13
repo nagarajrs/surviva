@@ -106,3 +106,8 @@ testing.
   native Linux filesystem path or `export ANSIBLE_CONFIG=$(pwd)/ansible.cfg`.
 - `create_fis_demo_template` (default `true`) only creates the experiment
   template — it is never auto-fired.
+- `replacement_market_type` (default `on-demand`): the orchestrator's
+  replacement instance, by default, is not itself Spot — you can't fire FIS
+  against it again after a restore. Set this to `spot` in
+  `group_vars/all.yml` (or `-e`) if you want to test a repeated
+  interruption/restore cycle.

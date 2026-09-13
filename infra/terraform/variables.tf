@@ -39,6 +39,16 @@ variable "ebs_attach_device" {
   default     = "/dev/sdf"
 }
 
+variable "replacement_market_type" {
+  description = "Purchasing option the orchestrator launches the replacement instance with. \"on-demand\" (default) avoids the replacement itself being immediately Spot-interruptible again right after a restore, at the cost of that workload no longer running on Spot going forward. \"spot\" keeps the cost saving but accepts the risk of a repeated interruption/restore cycle."
+  type        = string
+  default     = "on-demand"
+  validation {
+    condition     = contains(["on-demand", "spot"], var.replacement_market_type)
+    error_message = "replacement_market_type must be \"on-demand\" or \"spot\"."
+  }
+}
+
 variable "restore_ssm_document" {
   description = "SSM document used to run the restore command on the replacement instance."
   type        = string
