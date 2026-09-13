@@ -33,11 +33,11 @@ flowchart TD
     EventBridge -- triggers --> SFN["Step Functions\nrestore orchestrator\n(native AWS SDK integrations, no Lambda)"]
     SFN -- ec2:RunInstances (same launch template) --> NewDaemon
     SFN -- ec2:AttachVolume (if EBS) --> NewDaemon
-    SFN -- ssm:SendCommand\n"surviva restore <job_id>" --> NewDaemon
+    SFN -- "ssm:SendCommand\nsurviva restore job_id" --> NewDaemon
 
     subgraph NewInstance["Replacement Instance"]
         NewDaemon["surviva daemon\n(started by systemd/user-data)"]
-        Restore["surviva restore <job_id>"]
+        Restore["surviva restore job_id"]
         Restore -- "pull from S3 / mount EBS by-id" --> Dump2["local checkpoint dir"]
         Restore -- "criu restore / hook-resume" --> ResumedProc["resumed process\n(original PID)"]
         Restore -- re-register --> NewDaemon
