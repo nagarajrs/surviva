@@ -20,3 +20,8 @@ output "instance_profile_arn" {
 output "state_machine_arn" {
   value = aws_sfn_state_machine.restore_orchestrator.arn
 }
+
+output "fis_experiment_template_id" {
+  description = "Fire with `aws fis start-experiment --experiment-template-id <this>`, if create_fis_demo_template is true."
+  value       = var.create_fis_demo_template ? aws_fis_experiment_template.spot_interruption[0].id : null
+}

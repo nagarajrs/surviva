@@ -1,0 +1,34 @@
+#!/bin/bash
+# Reads deployment config from EC2 user-data at boot, so the same AMI works
+# unmodified for both the original sandbox instance and any replacement the
+# orchestrator auto-launches after a real interruption.
+set -e
+TOKEN=$(curl -s -X PUT http://169.254.169.254/latest/api/token -H 'X-aws-ec2-metadata-token-ttl-seconds: 21600')
+USERDATA=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/user-data)
+eval "$USERDATA"
+{% if storage_mode == 'ebs' %}
+# surviva daemon writes checkpoints straight to -checkpoint-dir and expects
+# it to already be on the EBS volume named by -ebs-volume-id -- it mounts
+# nothing itself (only `surviva restore`, on a replacement instance, does).
+# So mounting (and, on a genuinely blank volume, formatting) the volume at
+# the daemon's default checkpoint dir is this boot script's job.
+BYID="/dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_${SURVIVA_EBS_VOLUME_ID/-/}"
+for i in $(seq 1 30); do
+  [ -e "$BYID" ] && break
+  sleep 1
+done
+DEVICE=$(readlink -f "$BYID")
+mkdir -p /var/lib/surviva/checkpoints
+if ! blkid "$DEVICE" >/dev/null 2>&1; then
+  mkfs.ext4 -q -F "$DEVICE"
+fi
+mountpoint -q /var/lib/surviva/checkpoints || mount "$DEVICE" /var/lib/surviva/checkpoints
+{% endif %}
+exec /usr/local/bin/surviva daemon \
+{% if storage_mode == 'ebs' %}
+  --ebs-volume-id "${SURVIVA_EBS_VOLUME_ID:-}" \
+{% else %}
+  --s3-bucket "${SURVIVA_S3_BUCKET:-}" \
+{% endif %}
+  --dynamodb-table "${SURVIVA_TABLE:-}" \
+  --aws-region "${SURVIVA_AWS_REGION:-{{ aws_region }}}"

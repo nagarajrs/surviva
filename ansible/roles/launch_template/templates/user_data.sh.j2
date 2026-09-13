@@ -1,0 +1,7 @@
+export SURVIVA_TABLE={{ tf_outputs.jobs_table_name }}
+export SURVIVA_AWS_REGION={{ aws_region }}
+{% if storage_mode == 'ebs' %}
+export SURVIVA_EBS_VOLUME_ID={{ ebs_volume_id }}
+{% else %}
+export SURVIVA_S3_BUCKET={{ tf_outputs.checkpoints_bucket_name }}
+{% endif %}

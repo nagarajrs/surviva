@@ -1,0 +1,56 @@
+---
+# Creates the launch template both the sandbox instance and any
+# orchestrator-launched replacement instance are created from. The
+# rendered user-data becomes the template's own DEFAULT -- not a
+# per-instance override -- which matters: `ec2:RunInstances` for a
+# replacement instance carries over nothing from the original instance's
+# own launch, only whatever the launch template's default is (a real bug
+# found and fixed during this project's own manual validation).
+#
+# For EBS mode, `ebs_volume_id` must already be set (roles/ebs_storage runs
+# before this one) so the real volume id can be baked into the default
+# user-data -- there's no later opportunity to change a launch template's
+# already-launched instances' user-data.
+
+- name: Render the launch template's default user-data
+  ansible.builtin.set_fact:
+    _rendered_user_data: "{{ lookup('template', 'user_data.sh.j2') }}"
+
+- name: Delete any pre-existing launch template with this name first
+  # A new version created against an existing template carries forward
+  # unspecified fields (e.g. network_interfaces) from its source version
+  # rather than clearing them, which silently reintroduced a stale,
+  # since-removed field here once already. Deleting and recreating from
+  # scratch keeps this deterministic across repeated setup_sandbox.yml runs.
+  amazon.aws.ec2_launch_template:
+    template_name: "{{ name_prefix }}-lt"
+    region: "{{ aws_region }}"
+    state: absent
+  failed_when: false
+
+- name: Create the sandbox launch template
+  amazon.aws.ec2_launch_template:
+    template_name: "{{ name_prefix }}-lt"
+    image_id: "{{ sandbox_ami_id }}"
+    instance_type: "{{ instance_type }}"
+    iam_instance_profile: "{{ tf_outputs.instance_profile_name }}"
+    # No subnet_id or network_interfaces here on purpose: both the sandbox's
+    # own launch and the orchestrator's replacement-instance launch supply
+    # SubnetId themselves at RunInstances time (the latter via az_subnet_map,
+    # to follow the checkpoint volume's AZ in EBS mode) -- and RunInstances
+    # rejects a launch-template + top-level SubnetId combination outright if
+    # the template itself already defines network_interfaces ("Network
+    # interfaces and an instance-level subnet ID may not be specified on the
+    # same request", found the hard way against real EC2). Getting a public
+    # IP (this sandbox's target subnet has an internet gateway route but
+    # doesn't auto-assign one, and there's no NAT gateway or SSM VPC
+    # endpoints) is instead handled once, at the subnet level -- see
+    # setup_sandbox.yml's preflight.
+    user_data: "{{ _rendered_user_data | b64encode }}"
+    region: "{{ aws_region }}"
+    tags: "{{ resource_tags }}"
+  register: _lt
+
+- name: Record the launch template id
+  ansible.builtin.set_fact:
+    launch_template_id: "{{ _lt.default_template.launch_template_id }}"

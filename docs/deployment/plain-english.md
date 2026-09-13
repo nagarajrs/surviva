@@ -2,6 +2,10 @@
 
 This guide explains, in plain terms, what it takes to actually stand up surviva in a real AWS account. It doesn't cover what surviva *is* (see `../architecture/plain-english.md`) or the exact commands and flags (see `../api-cli/plain-english.md`) — just the sequence of steps to get it running for real.
 
+## Want to just try it first?
+
+There's a pair of ready-to-run scripts in the `ansible/` folder that do everything below for you — set up a real, disposable practice environment, let you trigger a real interruption and watch the automatic recovery happen, then tear the whole thing down again. See `ansible/README.md`. The rest of this guide explains what those scripts are actually doing, for anyone setting surviva up for real or wanting to understand it more deeply.
+
 ## Why deployment takes some up-front preparation
 
 The whole point of surviva is that when a cheap "Spot" computer is about to be taken away, it saves its work and a *replacement* computer picks up right where it left off — automatically, within a couple of minutes.

@@ -1,0 +1,122 @@
+---
+# Tears down everything setup_sandbox.yml created. Live, tag-based discovery
+# is the source of truth (see roles/sandbox_facts/tasks/discover.yml) -- not
+# the facts file, since an orchestrator-launched replacement instance (if
+# you fired the FIS experiment) is only ever discoverable that way. Safe to
+# run even after a partial/failed setup run, or more than once.
+
+- name: Destroy the surviva sandbox
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  # Loaded explicitly -- see setup_sandbox.yml for why this can't rely on
+  # ansible's group_vars auto-discovery.
+  vars_files:
+    - ../group_vars/all.yml
+
+  tasks:
+    - name: "Terraform: init and select the sandbox workspace"
+      ansible.builtin.include_role:
+        name: terraform_infra
+        tasks_from: init
+
+    - name: "Terraform: read outputs (checkpoint bucket name, if any)"
+      ansible.builtin.include_role:
+        name: terraform_infra
+        tasks_from: read_outputs
+
+    - name: Discover every real resource live, by tag
+      ansible.builtin.include_role:
+        name: sandbox_facts
+        tasks_from: discover
+
+    - name: Remember what this pass actually found, for the closing summary
+      # The discovery role runs a second time below, purely as a
+      # post-cleanup confirmation that everything is gone -- its (by then
+      # zero) counts aren't what actually got removed.
+      ansible.builtin.set_fact:
+        _found_instance_ids: "{{ discovered_instance_ids }}"
+        _found_ami_id: "{{ discovered_ami_id }}"
+        _found_ebs_volume_id: "{{ discovered_ebs_volume_id }}"
+
+    - name: Empty the checkpoint S3 bucket (terraform can't delete a non-empty bucket)
+      ansible.builtin.command:
+        argv: [aws, s3, rm, "s3://{{ tf_outputs.checkpoints_bucket_name }}", --recursive, --region, "{{ aws_region }}"]
+      when: (tf_outputs.checkpoints_bucket_name | default('')) | length > 0
+      changed_when: true
+      failed_when: false
+
+    - name: "Terraform: destroy (removes DynamoDB, IAM roles, state machine, EventBridge rule, S3 bucket, FIS template)"
+      ansible.builtin.include_role:
+        name: terraform_infra
+        tasks_from: destroy
+      vars:
+        tf_vars:
+          name_prefix: "{{ name_prefix }}"
+          aws_region: "{{ aws_region }}"
+          launch_template_id: "{{ discovered_launch_template_id | default('') }}"
+          az_subnet_map: "{{ az_subnet_map }}"
+          enable_s3_bucket: "{{ storage_mode == 's3' }}"
+          create_fis_demo_template: false
+
+    - name: Terminate every discovered instance (original, any replacement, any stray builder)
+      amazon.aws.ec2_instance:
+        instance_ids: "{{ discovered_instance_ids }}"
+        region: "{{ aws_region }}"
+        state: absent
+        wait: true
+      when: discovered_instance_ids | length > 0
+
+    - name: Deregister the sandbox AMI
+      amazon.aws.ec2_ami:
+        image_id: "{{ discovered_ami_id }}"
+        region: "{{ aws_region }}"
+        state: absent
+        delete_snapshot: true
+      when: discovered_ami_id | length > 0
+
+    - name: Delete the sandbox launch template
+      amazon.aws.ec2_launch_template:
+        template_id: "{{ discovered_launch_template_id }}"
+        region: "{{ aws_region }}"
+        state: absent
+      when: discovered_launch_template_id | default('') | length > 0
+
+    - name: Delete the checkpoint EBS test volume, if any
+      amazon.aws.ec2_vol:
+        id: "{{ discovered_ebs_volume_id }}"
+        region: "{{ aws_region }}"
+        state: absent
+      when: discovered_ebs_volume_id | length > 0
+
+    - name: Remove the local facts file
+      ansible.builtin.file:
+        path: "{{ facts_file }}"
+        state: absent
+
+    - name: Re-run discovery once more as a final self-check
+      ansible.builtin.include_role:
+        name: sandbox_facts
+        tasks_from: discover
+
+    - name: Assert nothing sandbox-tagged survives
+      ansible.builtin.assert:
+        that:
+          - discovered_instance_ids | length == 0
+          - discovered_ami_id | length == 0
+          - discovered_ebs_volume_id | length == 0
+        fail_msg: >-
+          Some resources are still visible right after teardown -- this can
+          just mean AWS hasn't finished propagating the deletions yet.
+          Re-run this playbook in a minute or two to confirm.
+        success_msg: "Confirmed: no sandbox-tagged instances, AMI, or EBS volume remain."
+
+    - name: Print the final teardown summary
+      ansible.builtin.debug:
+        msg:
+          - "=== surviva sandbox destroyed ==="
+          - "Terraform-managed resources (DynamoDB, IAM, state machine, EventBridge, S3, FIS): removed."
+          - "Instances terminated: {{ _found_instance_ids | length }}"
+          - "AMI/snapshot removed: {{ _found_ami_id | length > 0 }}"
+          - "EBS test volume removed: {{ _found_ebs_volume_id | length > 0 }}"
+          - "Local facts file removed: {{ facts_file }}"

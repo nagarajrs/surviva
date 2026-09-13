@@ -11,3 +11,7 @@
 !*.tfvars.example
 crash.log
 crash.*.log
+
+# Ansible sandbox
+ansible/files/
+ansible/.sandbox_facts/

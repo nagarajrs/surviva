@@ -62,3 +62,21 @@ variable "tags" {
   type        = map(string)
   default     = {}
 }
+
+variable "create_fis_demo_template" {
+  description = "Whether to create a dormant AWS Fault Injection Simulator experiment template (plus its execution role) pre-configured to send a real Spot interruption to fis_target_instance_arn. Never auto-run by Terraform; fire it yourself with `aws fis start-experiment` whenever you're ready. Leave false for a normal deployment -- this is only useful for the ansible sandbox / manual validation."
+  type        = bool
+  default     = false
+}
+
+variable "fis_target_instance_arn" {
+  description = "Instance ARN the FIS experiment template targets. Required when create_fis_demo_template is true."
+  type        = string
+  default     = ""
+}
+
+variable "fis_interruption_delay" {
+  description = "ISO-8601 duration FIS waits after starting the experiment before sending the interruption notice (the aws:ec2:send-spot-instance-interruptions action's durationBeforeInterruption parameter)."
+  type        = string
+  default     = "PT2M"
+}

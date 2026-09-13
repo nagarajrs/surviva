@@ -38,6 +38,14 @@ If a resume attempt fails (for whatever reason), surviva won't automatically try
 
 Each deployment of surviva's automatic-replacement system is tied to one specific machine "recipe" (what AWS calls a launch template) — matching one group of machines that are all supposed to be interchangeable. If you run several different kinds of machine fleets, each needs its own separate surviva setup.
 
+## Resuming at the exact same process ID can occasionally lose a race
+
+The freeze-and-resume technology brings a program back using its *exact original* process identifier (a number the operating system hands out) — and that number has to be completely free on the replacement machine, or the resume fails outright. This was discovered for real using the project's own hands-on sandbox (a set of setup/teardown scripts anyone can run to try the whole thing themselves — see the `ansible/` folder): the replacement machine boots up in a similar way to the original one, so it's occasionally already using that exact same number for something else by the time surviva tries to resume the job. Testing showed this doesn't happen most of the time, but when it does, there's currently no automatic workaround — it's treated like any other resume failure (see above: it won't retry itself).
+
+## Attaching a saved disk to a replacement machine can also occasionally lose a race
+
+Also found using the hands-on sandbox: when a job's saved snapshot lives on a separate disk, the replacement machine sometimes tries to attach that disk a little too soon — before AWS has finished detaching it from the machine that just got reclaimed. This is now handled by simply trying again a few times over roughly a minute or two, which comfortably covers the normal delay.
+
 ---
 
 For the deeper technical reasoning behind some of these tradeoffs, see the project's design-record document. For how the pieces fit together, see the architecture document.

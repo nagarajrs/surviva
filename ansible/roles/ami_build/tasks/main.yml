@@ -1,0 +1,191 @@
+---
+# Bakes the sandbox AMI: CRIU {{ criu_git_ref }} + the surviva binary +
+# systemd unit, pre-installed, exactly matching docs/deployment/technical.md.
+# Assumes the surviva binary has already been built locally at
+# {{ local_build_dir }}/surviva (setup_sandbox.yml does this once, up front).
+
+- name: Look up this account's id (for a globally-unique artifacts bucket name)
+  ansible.builtin.command:
+    argv: [aws, sts, get-caller-identity, --query, Account, --output, text]
+  register: _caller_identity
+  changed_when: false
+
+- name: Set account id fact
+  ansible.builtin.set_fact:
+    aws_account_id: "{{ _caller_identity.stdout | trim }}"
+    artifacts_bucket: "{{ name_prefix }}-artifacts-{{ _caller_identity.stdout | trim }}"
+
+- name: Create a small, transient artifacts bucket for binary staging
+  amazon.aws.s3_bucket:
+    name: "{{ artifacts_bucket }}"
+    region: "{{ aws_region }}"
+    tags: "{{ resource_tags }}"
+    state: present
+
+- name: Upload the locally-built surviva binary
+  amazon.aws.s3_object:
+    bucket: "{{ artifacts_bucket }}"
+    object: surviva
+    src: "{{ local_build_dir }}/surviva"
+    mode: put
+    region: "{{ aws_region }}"
+
+- name: Generate a presigned URL for the binary (valid 1 hour -- plenty for one AMI build)
+  ansible.builtin.command:
+    argv: [aws, s3, presign, "s3://{{ artifacts_bucket }}/surviva", --expires-in, "3600", --region, "{{ aws_region }}"]
+  register: _presign
+  changed_when: false
+
+- name: Set presigned URL fact
+  ansible.builtin.set_fact:
+    surviva_binary_url: "{{ _presign.stdout | trim }}"
+
+- name: Resolve the base AMI (Amazon Linux 2023)
+  amazon.aws.ec2_ami_info:
+    region: "{{ aws_region }}"
+    owners: ["{{ base_ami_owner }}"]
+    filters:
+      name: "{{ base_ami_name_filter }}"
+      state: available
+  register: _base_ami_info
+
+- name: Pick the newest matching base AMI
+  ansible.builtin.set_fact:
+    base_ami_id: "{{ (_base_ami_info.images | sort(attribute='creation_date'))[-1].image_id }}"
+
+- name: Launch the AMI-builder instance
+  ansible.builtin.command:
+    argv:
+      - aws
+      - ec2
+      - run-instances
+      - --image-id
+      - "{{ base_ami_id }}"
+      - --instance-type
+      - "{{ instance_type }}"
+      - --subnet-id
+      - "{{ subnet_id }}"
+      - --associate-public-ip-address
+      - --iam-instance-profile
+      - "Name={{ tf_outputs.instance_profile_name }}"
+      - --tag-specifications
+      - "ResourceType=instance,Tags=[{Key=Name,Value={{ name_prefix }}-ami-builder}]"
+      - --region
+      - "{{ aws_region }}"
+      - --output
+      - json
+  register: _builder_run
+  changed_when: true
+
+- name: Extract the builder instance id
+  ansible.builtin.set_fact:
+    builder_instance_id: "{{ (_builder_run.stdout | from_json).Instances[0].InstanceId }}"
+
+- name: Wait for the builder instance to reach running
+  amazon.aws.ec2_instance_info:
+    region: "{{ aws_region }}"
+    instance_ids: ["{{ builder_instance_id }}"]
+  register: _builder_state
+  until: _builder_state.instances[0].state.name == 'running'
+  retries: 30
+  delay: 10
+
+- name: Wait for the builder instance to register with SSM
+  # A real, known timing gap: EC2 "running" precedes SSM "Online" by up to a
+  # few minutes -- also true for a freshly created IAM instance profile,
+  # which can be rejected for a short window after creation.
+  ansible.builtin.command:
+    argv: [aws, ssm, describe-instance-information, --filters, "Key=InstanceIds,Values={{ builder_instance_id }}", --region, "{{ aws_region }}", --output, json]
+  register: _ssm_info
+  until: >-
+    (_ssm_info.stdout | from_json).InstanceInformationList | length > 0
+    and (_ssm_info.stdout | from_json).InstanceInformationList[0].PingStatus == 'Online'
+  retries: 30
+  delay: 10
+  changed_when: false
+
+- name: Install build dependencies and build CRIU {{ criu_git_ref }} from source
+  ansible.builtin.include_role:
+    name: ssm_command
+  vars:
+    ssm_instance_id: "{{ builder_instance_id }}"
+    ssm_timeout: 600
+    ssm_script: |
+      set -e
+      dnf install -y git gcc make protobuf-c-devel protobuf-c-compiler libnl3-devel \
+        libnet-devel libcap-devel python3-protobuf libbsd-devel iproute \
+        pkgconf-pkg-config protobuf-devel protobuf-compiler libuuid-devel
+      cd /root
+      rm -rf criu
+      git clone --depth 1 --branch {{ criu_git_ref }} https://github.com/checkpoint-restore/criu.git
+      cd criu
+      make -j$(nproc)
+      make install-criu
+      /usr/local/sbin/criu --version
+      /usr/local/sbin/criu check
+
+- name: Download the surviva binary onto the builder and install it
+  ansible.builtin.include_role:
+    name: ssm_command
+  vars:
+    ssm_instance_id: "{{ builder_instance_id }}"
+    ssm_timeout: 120
+    ssm_script: |
+      set -e
+      curl -sf -o /usr/local/bin/surviva '{{ surviva_binary_url }}'
+      # A presigned URL failure (expired, access denied, ...) still returns
+      # HTTP 200 with an XML error body from S3 directly served as the
+      # object body in some client configurations, silently corrupting the
+      # binary rather than failing the download -- confirm it's really an
+      # ELF executable before trusting it.
+      file /usr/local/bin/surviva | grep -q ELF || { echo "downloaded file is not an ELF binary:"; head -c 300 /usr/local/bin/surviva; exit 1; }
+      chmod 0755 /usr/local/bin/surviva
+      /usr/local/bin/surviva -h
+
+- name: Install the boot script and systemd unit, and enable (not start) the daemon
+  ansible.builtin.include_role:
+    name: ssm_command
+  vars:
+    ssm_instance_id: "{{ builder_instance_id }}"
+    ssm_timeout: 120
+    _boot_script_b64: "{{ lookup('template', 'surviva-boot.sh.j2') | b64encode }}"
+    _unit_b64: "{{ lookup('template', 'surviva-daemon.service.j2') | b64encode }}"
+    ssm_script: |
+      set -e
+      echo {{ _boot_script_b64 }} | base64 -d > /usr/local/bin/surviva-boot.sh
+      chmod 0755 /usr/local/bin/surviva-boot.sh
+      echo {{ _unit_b64 }} | base64 -d > /etc/systemd/system/surviva-daemon.service
+      systemctl daemon-reload
+      systemctl enable surviva-daemon
+      # Not started here on purpose -- there is no user-data on the builder
+      # itself, only on instances launched from the AMI via the launch template.
+
+- name: Bake the AMI from the builder instance
+  amazon.aws.ec2_ami:
+    instance_id: "{{ builder_instance_id }}"
+    name: "{{ name_prefix }}-{{ ansible_date_time.iso8601_basic_short }}"
+    wait: true
+    wait_timeout: 2400
+    tags: "{{ resource_tags | combine({'Name': name_prefix + '-ami', 'surviva-sandbox': name_prefix}) }}"
+    region: "{{ aws_region }}"
+    state: present
+  register: _ami
+
+- name: Record the baked AMI id and its backing snapshot id
+  ansible.builtin.set_fact:
+    sandbox_ami_id: "{{ _ami.image_id }}"
+    sandbox_ami_snapshot_id: "{{ _ami.block_device_mapping[_ami.root_device_name].snapshot_id }}"
+
+- name: Terminate the builder instance
+  amazon.aws.ec2_instance:
+    instance_ids: ["{{ builder_instance_id }}"]
+    region: "{{ aws_region }}"
+    state: absent
+    wait: false
+
+- name: Empty and delete the transient artifacts bucket
+  amazon.aws.s3_bucket:
+    name: "{{ artifacts_bucket }}"
+    region: "{{ aws_region }}"
+    state: absent
+    force: true

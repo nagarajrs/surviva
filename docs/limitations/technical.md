@@ -78,3 +78,20 @@ The Terraform module's Step Function/EventBridge rule pair is scoped to a single
 ## 15. Some orchestrator IAM permissions are necessarily broad
 
 `iam.tf`'s state machine policy grants `ec2:RunInstances`, `ec2:DescribeInstances`, `ec2:DescribeVolumes`, and `ec2:AttachVolume` on `resources = ["*"]` — none of these APIs support scoping to a replacement instance/volume ARN that doesn't exist yet at policy-authoring time. `iam:PassRole` is scoped via the `aws:PassedToService = ec2.amazonaws.com` condition rather than to a specific resource for the same reason. This is a known, accepted least-privilege compromise, not an oversight.
+
+## 16. Restoring at the exact original PID can lose a race against the replacement instance's own boot
+
+CRIU restores a checkpointed process at its *original* PID — that PID number must be completely unused on the restore target at restore time, or restore fails outright:
+```
+Error (criu/cr-restore.c:1230): Can't fork for 1771: File exists
+Error (criu/cr-restore.c:2324): Restoring FAILED.
+```
+Discovered for real via the ansible sandbox (`../../ansible/`) firing a genuine FIS Spot interruption in EBS storage mode: the replacement instance boots from the same AMI as the original, so it tends to allocate PIDs to its own early services (SSM agent, udev, the checkpoint-volume mount step, etc.) in a similar range to whatever the original had already reached by the time the tracked job forked — a low-PID job (something that forked early in the original instance's own boot) has a real, non-negligible chance of colliding with whatever the replacement's boot has, by then, assigned that same number to. Repeated tests of the identical scenario showed this is a probabilistic collision, not a deterministic one: most restores succeed. There is no code-level mitigation today (CRIU offers no "restore at a different PID" mode for an unprivileged single-process restore of this kind) — a failed restore surfaces exactly like any other restore failure (`FAILED` status, `failure_reason` populated, see limitation 10) and is not automatically retried.
+
+## 17. Attaching an EBS checkpoint volume to a replacement instance can race the original instance's own detach
+
+Found the same way as limitation 16: the orchestrator's `AttachVolume` state can run before EC2 has finished detaching the volume from the just-terminated original instance, since Spot interruption → instance termination → volume detach isn't instant relative to the orchestrator's own `WaitForCheckpoints` timer:
+```
+Ec2.Ec2Exception: vol-xxxxxxxx is already attached to an instance
+```
+Mitigated with a bounded `Retry` on that state (`ErrorEquals: ["Ec2.Ec2Exception"]`, 10 attempts, 10s interval, 1.3x backoff — `templates/restore_orchestrator.asl.json.tftpl`); Step Functions' direct AWS SDK integrations don't expose a more specific error code than the service-level exception class, so the retry is necessarily broader than just this one transient condition, trading a slightly slower failure for a much higher success rate on the common case.

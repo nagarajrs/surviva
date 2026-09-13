@@ -2,6 +2,10 @@
 
 Practical, validated steps to deploy surviva into a real AWS account. This exact sequence was run end-to-end against AWS, including a genuine AWS Fault Injection Simulator (FIS) triggered Spot interruption. For flag semantics see `../api-cli/technical.md`; for the system model see `../architecture/technical.md`; for full IAM JSON and per-file responsibilities see `../components/technical.md`; for the full FIS validation procedure see `../testing-strategy/technical.md`.
 
+## Fast path: the Ansible sandbox
+
+If you just want to see the whole thing work — a real Spot instance, a real FIS-triggered interruption, a real automatic restore — without hand-running any of the steps below, `../../ansible/` has two playbooks that do it for you: `setup_sandbox.yml` provisions everything (AMI bake included) and `destroy_sandbox.yml` tears it all back down. Both storage modes (S3 and EBS) are exercised end-to-end this way, including firing a real FIS experiment and confirming the job resumes at its original PID. See `../../ansible/README.md`. The rest of this document is the from-scratch manual reference the sandbox itself is built on.
+
 ## 1. Bake an AMI (CRIU + surviva pre-installed)
 
 **Do not** install or compile CRIU/surviva at instance boot time. A real timing race was found: the orchestrator's SSM `surviva restore <job-id>` command can arrive on the replacement instance before a boot-time install/build finishes, and the command fails outright. Bake everything into the AMI instead.

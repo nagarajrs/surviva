@@ -179,6 +179,14 @@
               "InstanceId": "{% $newInstanceId %}",
               "Device": "${ebs_attach_device}"
             },
+            "Retry": [
+              {
+                "ErrorEquals": ["Ec2.Ec2Exception"],
+                "IntervalSeconds": 10,
+                "MaxAttempts": 10,
+                "BackoffRate": 1.3
+              }
+            ],
             "Next": "WaitForVolumeAttached"
           },
           "WaitForVolumeAttached": {

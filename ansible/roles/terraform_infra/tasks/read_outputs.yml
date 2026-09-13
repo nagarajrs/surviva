@@ -1,0 +1,18 @@
+---
+# Reads `terraform output -json` into a flat `tf_outputs` dict (just the
+# `.value` of each output, not the sensitive/type metadata terraform wraps
+# it in).
+
+- name: Read terraform outputs
+  ansible.builtin.command:
+    cmd: terraform output -json
+    chdir: "{{ terraform_dir }}"
+  register: _tf_outputs_raw
+  changed_when: false
+
+- name: Flatten terraform outputs into tf_outputs
+  ansible.builtin.set_fact:
+    tf_outputs: "{{ tf_outputs | default({}) | combine({item.key: item.value.value}) }}"
+  loop: "{{ (_tf_outputs_raw.stdout | from_json) | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"

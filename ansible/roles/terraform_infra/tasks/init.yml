@@ -1,0 +1,16 @@
+---
+# Initializes infra/terraform and switches to a dedicated workspace, so this
+# sandbox never touches or gets confused by that directory's own default
+# workspace state (which may hold unrelated resources from other work).
+
+- name: terraform init
+  ansible.builtin.command:
+    cmd: terraform init -input=false
+    chdir: "{{ terraform_dir }}"
+  changed_when: false
+
+- name: Select (creating if needed) the sandbox workspace
+  ansible.builtin.command:
+    cmd: "terraform workspace select -or-create=true {{ terraform_workspace }}"
+    chdir: "{{ terraform_dir }}"
+  changed_when: false

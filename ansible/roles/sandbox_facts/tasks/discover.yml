@@ -1,0 +1,89 @@
+---
+# Live, tag-based discovery of everything destroy_sandbox.yml needs to tear
+# down. This is the source of truth, not the facts file -- specifically
+# because an orchestrator-launched REPLACEMENT instance (created if the
+# user actually fired the FIS experiment) is never written to the facts
+# file and carries none of this project's own tags, only the automatic
+# `aws:ec2launchtemplate:id` tag EC2 stamps on every instance launched from
+# a template. The facts file is loaded only as a fallback for name_prefix
+# lookups if it exists.
+
+- name: Load the facts file, if present (fallback only)
+  ansible.builtin.set_fact:
+    _facts_cache: "{{ lookup('file', facts_file) | from_json }}"
+  when: (facts_file is file)
+
+- name: Find the sandbox launch template by name
+  ansible.builtin.command:
+    argv: [aws, ec2, describe-launch-templates, --launch-template-names, "{{ name_prefix }}-lt", --region, "{{ aws_region }}", --output, json]
+  register: _lt_lookup
+  failed_when: false
+  changed_when: false
+
+- name: Set discovered launch template id (empty string if none found)
+  ansible.builtin.set_fact:
+    discovered_launch_template_id: >-
+      {{ ((_lt_lookup.stdout | from_json).LaunchTemplates[0].LaunchTemplateId
+          if _lt_lookup.rc == 0 and (_lt_lookup.stdout | from_json).LaunchTemplates | length > 0
+          else '') }}
+
+- name: Find every non-terminated instance launched from that template (catches an orchestrator replacement)
+  ansible.builtin.command:
+    argv: [aws, ec2, describe-instances, --filters,
+           "Name=tag:aws:ec2launchtemplate:id,Values={{ discovered_launch_template_id }}",
+           "Name=instance-state-name,Values=pending,running,stopping,stopped",
+           --region, "{{ aws_region }}", --output, json]
+  register: _lt_instances
+  when: discovered_launch_template_id != ''
+  changed_when: false
+
+- name: Find any stray AMI-builder instance left behind by a failed run
+  ansible.builtin.command:
+    argv: [aws, ec2, describe-instances, --filters,
+           "Name=tag:Name,Values={{ name_prefix }}-ami-builder",
+           "Name=instance-state-name,Values=pending,running,stopping,stopped",
+           --region, "{{ aws_region }}", --output, json]
+  register: _builder_instances
+  changed_when: false
+
+- name: Collect all discovered instance ids
+  ansible.builtin.set_fact:
+    discovered_instance_ids: >-
+      {{
+        (
+          (_lt_instances.stdout | default('{"Reservations":[]}') | from_json).Reservations
+          + (_builder_instances.stdout | from_json).Reservations
+        )
+        | map(attribute='Instances') | flatten | map(attribute='InstanceId') | unique | list
+      }}
+
+- name: Find the sandbox AMI (and its backing snapshot) by tag
+  ansible.builtin.command:
+    argv: [aws, ec2, describe-images, --owners, self, --filters,
+           "Name=tag:surviva-sandbox,Values={{ name_prefix }}",
+           --region, "{{ aws_region }}", --output, json]
+  register: _ami_lookup
+  changed_when: false
+
+- name: Set discovered AMI / snapshot facts
+  ansible.builtin.set_fact:
+    discovered_ami_id: "{{ (_ami_lookup.stdout | from_json).Images[0].ImageId if (_ami_lookup.stdout | from_json).Images | length > 0 else '' }}"
+    discovered_ami_snapshot_id: >-
+      {{
+        ((_ami_lookup.stdout | from_json).Images[0].BlockDeviceMappings
+          | selectattr('Ebs', 'defined') | map(attribute='Ebs.SnapshotId') | first)
+        if (_ami_lookup.stdout | from_json).Images | length > 0 else ''
+      }}
+
+- name: Find the checkpoint EBS test volume by tag
+  ansible.builtin.command:
+    argv: [aws, ec2, describe-volumes, --filters,
+           "Name=tag:surviva-sandbox,Values={{ name_prefix }}",
+           "Name=status,Values=available,in-use",
+           --region, "{{ aws_region }}", --output, json]
+  register: _vol_lookup
+  changed_when: false
+
+- name: Set discovered EBS volume id (empty string if none found)
+  ansible.builtin.set_fact:
+    discovered_ebs_volume_id: "{{ (_vol_lookup.stdout | from_json).Volumes[0].VolumeId if (_vol_lookup.stdout | from_json).Volumes | length > 0 else '' }}"

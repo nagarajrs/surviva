@@ -1,0 +1,28 @@
+---
+# Runs `terraform apply` with whatever key/value pairs are in the `tf_vars`
+# dict, passed in by whichever task included this file. Reusable for both
+# the placeholder pass-1 apply and the real pass-2 apply.
+
+- name: Build -var arguments from tf_vars
+  # Terraform's -var parser only runs a value through HCL/JSON expression
+  # parsing for complex (map/list) variable types; for a plain string-typed
+  # variable it takes the CLI text completely literally, quotes and all, so
+  # JSON-encoding every value (`to_json` unconditionally) breaks every string
+  # var by leaving literal quote characters embedded in it. Booleans still
+  # need `to_json` (never Jinja's `string` filter, which capitalizes them as
+  # "True"/"False" -- invalid for a bool variable); dicts need it too.
+  ansible.builtin.set_fact:
+    _tf_var_args: "{{ _tf_var_args | default([]) + ['-var=' + item.key + '=' + ((item.value | to_json) if (item.value is mapping or item.value is sameas true or item.value is sameas false) else (item.value | string))] }}"
+  loop: "{{ tf_vars | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+
+- name: terraform apply
+  ansible.builtin.command:
+    argv: "{{ ['terraform', 'apply', '-auto-approve', '-input=false'] + _tf_var_args }}"
+    chdir: "{{ terraform_dir }}"
+  changed_when: true
+
+- name: Clear the accumulated -var arguments (so a second apply.yml include in the same play starts clean)
+  ansible.builtin.set_fact:
+    _tf_var_args: []
