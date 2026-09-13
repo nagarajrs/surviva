@@ -190,6 +190,35 @@ Every real resource created for this test — 2 EC2 instances, 1 AMI + its backi
 staging bucket — was deleted afterward and confirmed gone via an account-wide
 `describe-instances`/`describe-images`/`list-tables`/`list-buckets`/`iam list-roles` sweep.
 
+## Post-launch: CRIU version upgrade (3.19 → 4.2)
+
+After the project was otherwise complete, CRIU was re-evaluated at tag `v4.2` (upstream's
+current stable release; `v3.19` was over a year old by then) to check whether the pin was
+still the right call. Done on a dedicated branch, with the same "verify for real, not just
+`criu check`" standard as everywhere else in this project:
+
+- **WSL2**: `v4.2` built cleanly **without** `WERROR=0` — the GCC-13 `-Werror=format-truncation`
+  issue that forced that flag on `v3.19` appears fixed upstream. A real dump+restore cycle of
+  a plain `sleep` process succeeded, both via raw `criu` commands and through the actual
+  `surviva daemon`/`surviva run` code path (tracked a job, triggered a real checkpoint via
+  the mock IMDS server, restored it, original PID preserved).
+- **Real AL2023/Nitro EC2** — the exact environment the 3.17.1 segfault was originally found
+  on: the `v4.2` build failed at first with a new required dependency not needed by `v3.19`:
+  `libuuid-devel` (RPM) / `uuid-dev` (Debian), surfaced by CRIU's own
+  `criu/Makefile.packages` dependency check, not a cryptic compiler error. Once added, the
+  build succeeded, `criu check` passed, and — the test that actually matters, since `criu
+  check` also passed on the broken 3.17.1 package — a real dump+restore cycle succeeded on
+  this exact hardware/kernel, again both via raw `criu` commands and through the real daemon
+  checkpoint pipeline. No regression versus `v3.19`'s behavior on the same instance type.
+- One incidental finding, not yet exercised further: `v4.2`'s build now produces a
+  `cuda_plugin.so` that `v3.19` did not — CRIU has gained some CUDA/GPU-related capability
+  since 3.19, though this project has not tested or made any claim about actual GPU
+  checkpoint support (see `../limitations/technical.md`, item 1).
+
+All temporary AWS resources created for this round (1 EC2 instance, IAM role/profile, S3
+staging bucket) were deleted and confirmed gone afterward. Full rationale for the version
+choice and switch is in `../design-record/technical.md`.
+
 ## What is explicitly NOT covered yet
 
 - **No automated regression test suite or CI pipeline.** Every verification above was a

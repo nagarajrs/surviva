@@ -61,6 +61,18 @@ important details for anyone using this system in practice:
 
 Both of these are explained in more detail in [`../limitations/plain-english.md`](../limitations/plain-english.md).
 
+## Checking a newer version of the freezing tool, the same way
+
+Some time after the system was otherwise finished, a newer version of the underlying
+freeze/resume tool (CRIU) became available, and the question came up: should the project
+switch to it? Rather than just assuming a newer version is automatically fine — especially
+given that an *older* packaged version of this same tool had once passed its own built-in
+health check while actually being broken — the team rebuilt the newer version and ran it
+through the same real freeze-then-resume test, on the very same type of real cloud computer
+where that earlier broken version had been found. It passed cleanly, needed one small
+addition to how it's built, and no longer needed an earlier workaround at all. The switch
+was made only after that real test passed, not before.
+
 ## What hasn't been tested yet (being honest about it)
 
 This system has been proven to work, end to end, for real — once. That's meaningfully

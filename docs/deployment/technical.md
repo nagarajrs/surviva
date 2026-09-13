@@ -8,19 +8,21 @@ Practical, validated steps to deploy surviva into a real AWS account. This exact
 
 Base AMI used: Amazon Linux 2023 (Fedora-derived, has SSM agent pre-installed).
 
-**CRIU — build from source, do not use the dnf package.** AL2023's `criu` dnf package (3.17.1 at time of testing) segfaults on `criu restore` on the current AL2023 kernel. A source build of criu 3.19 restores correctly on the same kernel.
+**CRIU — build from source, do not use the dnf package.** AL2023's `criu` dnf package (3.17.1 at time of testing) segfaults on `criu restore` on the current AL2023 kernel. A source build of criu 4.2 restores correctly on the same kernel — verified directly against this exact instance/kernel with a real dump+restore cycle, both via plain `criu` commands and through the actual `surviva daemon`/`surviva run` code path.
 
 ```bash
 dnf install -y git gcc make protobuf-c-devel protobuf-c-compiler libnl3-devel \
   libnet-devel libcap-devel python3-protobuf libbsd-devel iproute \
-  pkgconf-pkg-config protobuf-devel protobuf-compiler
+  pkgconf-pkg-config protobuf-devel protobuf-compiler libuuid-devel
 
-git clone --depth 1 --branch v3.19 https://github.com/checkpoint-restore/criu.git
+git clone --depth 1 --branch v4.2 https://github.com/checkpoint-restore/criu.git
 cd criu
-make -j$(nproc) WERROR=0
+make -j$(nproc)
 make install-criu   # installs to /usr/local/sbin/criu
 which -a criu        # confirm /usr/local/sbin/criu precedes any /usr/bin or /usr/sbin criu on PATH
 ```
+
+Two things changed versus the 3.19 build used earlier in this project (see `../design-record/technical.md`): `libuuid-devel` is now a required build dependency (4.2's build fails with a clear "Can not find some of the required libraries" error without it, listing `libuuid-devel` for RPM-based distros / `uuid-dev` for Debian-based); and `WERROR=0` is no longer needed — 4.2 builds cleanly under AL2023's/Ubuntu 24.04's newer GCC without disabling `-Werror`, unlike 3.19.
 
 **surviva binary:**
 

@@ -23,7 +23,7 @@ Amazon Linux 2023's `dnf` package `criu-3.17.1-1.amzn2023.0.4` passes `criu chec
 Error (criu/cr-restore.c:1498): <pid> killed by signal 11: Segmentation fault
 Error (criu/cr-restore.c:2536): Restoring FAILED.
 ```
-Reproduced with plain `criu dump`/`criu restore` outside surviva entirely (a trivial `sleep` process), ruling out a surviva-specific cause. A source build of `checkpoint-restore/criu` tag `v3.19` (`make WERROR=0 && make install-criu`, installing to `/usr/local/sbin`, which must precede `/usr/bin` on `PATH`) restores correctly on the identical instance/kernel. Mitigation: bake a known-good CRIU build into the AMI (see `../deployment/technical.md`); do not rely on `criu check` alone as a health signal — validate an actual dump+restore cycle on the target AMI/kernel.
+Reproduced with plain `criu dump`/`criu restore` outside surviva entirely (a trivial `sleep` process), ruling out a surviva-specific cause. A source build of `checkpoint-restore/criu` tag `v4.2` (`make && make install-criu`, installing to `/usr/local/sbin`, which must precede `/usr/bin` on `PATH`) restores correctly on the identical instance/kernel — re-confirmed directly on real AL2023/Nitro hardware after an earlier source build of `v3.19` was superseded (see `../design-record/technical.md`). Mitigation: bake a known-good CRIU build into the AMI (see `../deployment/technical.md`); do not rely on `criu check` alone as a health signal — validate an actual dump+restore cycle on the target AMI/kernel, since the broken 3.17.1 package also printed "Looks good."
 
 ## 4. EBS checkpoint volumes are AZ-locked
 
