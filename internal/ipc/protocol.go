@@ -19,6 +19,7 @@ const (
 	ActionRegister   Action = "register"
 	ActionDeregister Action = "deregister"
 	ActionList       Action = "list"
+	ActionStop       Action = "stop"
 )
 
 // RegisterJob is the payload for ActionRegister.

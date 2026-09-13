@@ -70,3 +70,11 @@ func (c *Client) List() ([]job.Job, error) {
 	}
 	return resp.Jobs, nil
 }
+
+// Stop asks the daemon to send SIGTERM to a tracked job's process group and
+// remove it from tracking, regardless of whether the process that
+// registered it (e.g. `surviva run`) is still around to do so itself.
+func (c *Client) Stop(jobID string) error {
+	_, err := c.call(Request{Action: ActionStop, JobID: jobID})
+	return err
+}

@@ -1,13 +1,14 @@
 # The `surviva` command-line tool — plain-English guide
 
-`surviva` is a single program with four modes ("subcommands"). You always start
-with `surviva`, then tell it which of the four things you want it to do.
+`surviva` is a single program with five modes ("subcommands"). You always start
+with `surviva`, then tell it which of the five things you want it to do.
 
 | Command | What it's for |
 |---|---|
 | `surviva run` | Wrap the command you actually want to run (e.g. a long bioinformatics job), so it's protected. |
 | `surviva daemon` | The background service that watches for interruption warnings and does the actual saving. |
 | `surviva list` | Show what jobs are currently being watched on this machine. |
+| `surviva stop` | Stop a job and remove it from tracking. |
 | `surviva restore` | Bring a saved job back to life on a new machine. |
 
 A quick refresher on the vocabulary: a **checkpoint** is a snapshot of a running
@@ -63,6 +64,21 @@ baked into the machine's startup configuration by whoever deployed the system
 Run this on a machine to see every job currently tracked, its status (still
 running, being saved, saved successfully, failed, etc.), and what command it
 is. Useful for checking "is my job actually protected?"
+
+## `surviva stop` — cancel a job
+
+If you started a job with `surviva run` in your own terminal and want to
+cancel it, pressing Ctrl+C works — it now correctly stops the actual job, not
+just surviva's own wrapper around it. But sometimes a job ends up "orphaned":
+whatever was watching it (your terminal session, `surviva run` itself) is
+long gone, yet `surviva list` still insists it's running, because nothing
+else in the system ever checks whether that's actually still true.
+`surviva stop <job-id>` fixes that directly — it stops the actual program and
+removes it from the list in one step, no matter what happened to whatever was
+originally supervising it. It only works on a job that's still genuinely
+running; it refuses to touch one that's in the middle of being saved, or
+already saved successfully, since removing that record could make a
+legitimate save impossible to recover later.
 
 ## `surviva restore` — bring a job back
 

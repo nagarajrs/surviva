@@ -35,6 +35,7 @@ for the reasoning behind the non-obvious choices noted below see
 | `run.go` | `surviva run` — wraps and tracks a command. |
 | `daemon.go` | `surviva daemon` — flag parsing, builds `daemon.Config`. |
 | `list.go` | `surviva list` — queries the daemon over IPC and prints a table or JSON. |
+| `stop.go` | `surviva stop <job-id>` — asks the daemon to SIGTERM a job's process group and untrack it, whether or not whatever registered it (`surviva run`) is still around to do so itself. |
 | `restore.go` | `surviva restore` — the restore flow driven by the orchestrator's SSM command; the `fail()` helper marks a job `FAILED` with a reason on any error, used at every failure point in the flow. |
 
 ## `internal/job` — shared data model
@@ -60,7 +61,7 @@ do with the durable DynamoDB status store in `internal/remote`.
 
 - `protocol.go` — the request/response types for a newline-delimited JSON
   protocol over a Unix domain socket (`ActionRegister`, `ActionDeregister`,
-  `ActionList`, `ActionPing`). Also owns the three environment-driven default
+  `ActionList`, `ActionStop`, `ActionPing`). Also owns the three environment-driven default
   paths: `DefaultSocketPath` (`SURVIVA_SOCKET`), `DefaultDBPath`
   (`SURVIVA_DB_PATH`), `DefaultCheckpointDir` (`SURVIVA_CHECKPOINT_DIR`) —
   each falls back to a Linux path under `/var/{run,lib}/surviva` or an OS

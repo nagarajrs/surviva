@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"syscall"
 	"time"
 
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
@@ -22,6 +23,7 @@ import (
 	"surviva/internal/imds"
 	"surviva/internal/ipc"
 	"surviva/internal/job"
+	"surviva/internal/procsignal"
 	"surviva/internal/remote"
 	"surviva/internal/store"
 )
@@ -280,6 +282,35 @@ func (d *Daemon) dispatch(req ipc.Request) ipc.Response {
 			return ipc.Response{OK: false, Error: err.Error()}
 		}
 		return ipc.Response{OK: true, Jobs: jobs}
+
+	case ipc.ActionStop:
+		if req.JobID == "" {
+			return ipc.Response{OK: false, Error: "missing job_id"}
+		}
+		existing, err := d.store.Get(req.JobID)
+		if err != nil {
+			return ipc.Response{OK: true} // already gone; stop is idempotent
+		}
+		// Unlike deregister (which only ever races a job's own `surviva run`
+		// wrapper over a job that's still RUNNING), stop is a deliberate,
+		// unconditional cancellation -- refuse it once the checkpoint
+		// subsystem owns the record (mid-checkpoint or already durable),
+		// since ripping that out from under a restore in flight, or a
+		// completed checkpoint someone might still want to restore from,
+		// would be actively harmful rather than just a no-op.
+		if existing.Status != job.StatusRunning {
+			return ipc.Response{OK: false, Error: fmt.Sprintf("refusing to stop job %s: status is %s, not %s", req.JobID, existing.Status, job.StatusRunning)}
+		}
+		// KillGroup treats an already-dead process group (e.g. it exited
+		// right as this request arrived) as success, not an error.
+		if err := procsignal.KillGroup(existing.PGID, syscall.SIGTERM); err != nil {
+			return ipc.Response{OK: false, Error: fmt.Sprintf("signal job %s: %v", req.JobID, err)}
+		}
+		if err := d.store.Delete(req.JobID); err != nil {
+			return ipc.Response{OK: false, Error: err.Error()}
+		}
+		log.Printf("stopped job %s (pgid %d)", req.JobID, existing.PGID)
+		return ipc.Response{OK: true}
 
 	default:
 		return ipc.Response{OK: false, Error: fmt.Sprintf("unknown action %q", req.Action)}

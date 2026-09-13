@@ -1,8 +1,8 @@
 # `surviva` CLI reference
 
-Single binary, four subcommands: `run`, `daemon`, `list`, `restore`. Flags use
-Go's standard `flag` package (single-dash, `-h` per subcommand for a live
-list).
+Single binary, five subcommands: `run`, `daemon`, `list`, `stop`, `restore`.
+Flags use Go's standard `flag` package (single-dash, `-h` per subcommand for a
+live list).
 
 ```
 surviva - checkpoint/restore protection for Spot interruptions
@@ -11,6 +11,7 @@ Usage:
   surviva run [flags] -- <command> [args...]   Run and track a command
   surviva daemon [flags]                       Run the surviva daemon
   surviva list [flags]                         List jobs tracked by the daemon
+  surviva stop [flags] <job-id>                Terminate and untrack a RUNNING job
   surviva restore [flags] <job-id>             Restore a checkpointed job on this instance
 
 Run 'surviva <command> -h' for flags on a specific subcommand.
@@ -137,6 +138,31 @@ tracked jobs, prints `no tracked jobs` and exits 0.
 ```
 surviva list
 surviva list -json | jq '.[] | select(.status == "FAILED")'
+```
+
+---
+
+## `surviva stop [flags] <job-id>`
+
+| Flag | Type | Default | Description |
+|---|---|---|---|
+| `-socket` | string | `DefaultSocketPath()` | Daemon socket to talk to. |
+
+Sends `SIGTERM` to the job's whole process group and removes it from
+tracking — the daemon does this directly, so it works even if the `surviva
+run` that registered the job is no longer around to deregister it itself
+(killed directly, a dropped session, or anything else that orphaned the
+record). Deliberately **not the same code path** as a normal exit: refuses
+(exit 1) once the job's status is anything other than `RUNNING` — a
+checkpoint in progress or already durable is owned by the checkpoint/restore
+subsystem from that point on, and ripping the record out from under it would
+be actively harmful, not just redundant. Idempotent: stopping an
+already-gone job id is a no-op success (exit 0), and a process group that no
+longer exists is treated the same way — there's simply nothing left to
+signal.
+
+```
+surviva stop 6a81d8ec-6d1a-4d99-bd8e-259b44ebab53
 ```
 
 ---
