@@ -5,6 +5,8 @@ package main
 import (
 	"fmt"
 	"os"
+
+	"surviva/internal/version"
 )
 
 func main() {
@@ -25,6 +27,9 @@ func main() {
 		code = stopCmd(os.Args[2:])
 	case "restore":
 		code = restoreCmd(os.Args[2:])
+	case "version", "-v", "-version", "--version":
+		fmt.Println("surviva " + version.Version)
+		code = 0
 	case "-h", "--help", "help":
 		printUsage()
 		code = 0
@@ -37,7 +42,7 @@ func main() {
 }
 
 func printUsage() {
-	fmt.Fprint(os.Stderr, `surviva - checkpoint/restore protection for Spot interruptions
+	fmt.Fprintf(os.Stderr, `surviva %s - checkpoint/restore protection for Spot interruptions
 
 Usage:
   surviva run [flags] -- <command> [args...]   Run and track a command
@@ -45,7 +50,8 @@ Usage:
   surviva list [flags]                         List jobs tracked by the daemon
   surviva stop [flags] <job-id>                Terminate and untrack a RUNNING job
   surviva restore [flags] <job-id>             Restore a checkpointed job on this instance
+  surviva version                              Print the surviva version
 
 Run 'surviva <command> -h' for flags on a specific subcommand.
-`)
+`, version.Version)
 }

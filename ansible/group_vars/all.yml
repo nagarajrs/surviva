@@ -48,7 +48,7 @@ fis_interruption_delay: PT2M
 # saving, at the risk of a repeated interruption/restore cycle -- set this
 # if you want to test that chain (e.g. fire FIS again against the
 # replacement itself).
-replacement_market_type: on-demand
+replacement_market_type: spot
 
 # Isolates this sandbox's Terraform state from infra/terraform's default
 # workspace (which may have its own, unrelated state).
