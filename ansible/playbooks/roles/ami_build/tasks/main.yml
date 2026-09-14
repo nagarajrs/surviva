@@ -160,6 +160,34 @@
       # Not started here on purpose -- there is no user-data on the builder
       # itself, only on instances launched from the AMI via the launch template.
 
+- name: Install and configure the CloudWatch Agent, and enable (not start) it
+  # Ships the daemon's own log (StandardOutput/StandardError in the systemd
+  # unit above, now a plain file rather than journal) to the log group
+  # infra/terraform creates, so troubleshooting a checkpoint/restore failure
+  # doesn't depend on SSM access to an instance that may already be gone --
+  # confirmed useful for real diagnosing a real restore failure this way.
+  ansible.builtin.include_role:
+    name: ssm_command
+  vars:
+    ssm_instance_id: "{{ builder_instance_id }}"
+    ssm_timeout: 180
+    _cwagent_config_b64: "{{ lookup('template', 'cwagent-config.json.j2') | b64encode }}"
+    ssm_script: |
+      set -e
+      dnf install -y amazon-cloudwatch-agent
+      mkdir -p /opt/aws/amazon-cloudwatch-agent/etc
+      echo {{ _cwagent_config_b64 }} | base64 -d > /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json
+      /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
+        -a fetch-config -m ec2 -s \
+        -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json
+      systemctl stop amazon-cloudwatch-agent
+      systemctl enable amazon-cloudwatch-agent
+      # -s above starts it immediately (needed to actually apply the fetched
+      # config and confirm it's valid); stopped again right after so it
+      # isn't "already running" against the builder instance's own
+      # transient state -- enabled so it starts fresh at boot on every real
+      # instance launched from this AMI.
+
 - name: Bake the AMI from the builder instance
   amazon.aws.ec2_ami:
     instance_id: "{{ builder_instance_id }}"

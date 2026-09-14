@@ -120,3 +120,23 @@ First: the tracked child runs in its own session (`internal/procattr`), so a ter
 Second, confirmed by direct reproduction independent of surviva entirely: a bash script run as a backgrounded/asynchronous command (`cmd &` — which is exactly how a session-detached tracked child ends up running) sets its own SIGINT/SIGQUIT disposition to ignored. This is a documented POSIX shell rule, not a surviva or CRIU quirk — `kill -INT` against such a script's process group genuinely does nothing, while `kill -TERM` against the identical process terminates it immediately.
 
 Fixed in `cmd/surviva/run.go`: catches SIGINT/SIGTERM and forwards **SIGTERM** (never the literal signal received) to the child's process group (`internal/procsignal`). Verified for real: a tracked bash script now dies and is cleanly deregistered on SIGINT to the wrapper, matching what a user pressing Ctrl+C expects.
+
+## 21. A checkpointed *script*, not just its stdout/stderr, must exist at the same path on the restore target
+
+A specific, easy-to-hit case of limitation 2's general rule, found for real: a user tracked `./counter.sh` (a bash script, invoked by relative path) whose stdio was already correctly backgrounded to `/dev/null`. Checkpoint succeeded — S3 upload confirmed, DynamoDB showed the record durable — but restore on the replacement instance still failed:
+```
+Error (criu/files-reg.c:2353): Can't open file root/counter.sh on restore: No such file or directory
+Error (criu/cr-restore.c:1262): <pid> killed by signal 9: Killed
+Error (criu/cr-restore.c:2324): Restoring FAILED.
+```
+Bash keeps the script file itself open as a file descriptor for as long as it's executing it, exactly like any other open regular file CRIU records — the replacement instance's own copy of the AMI simply never had `/root/counter.sh` on it (the user had created it by hand on the original instance only). The single DynamoDB `status` field only ever shows the *latest* transition (here, `FAILED`, from the restore step) — it's not a history log, so "was this a checkpoint or a restore failure" has to be read from `failure_reason` (here, clearly naming `criu restore`) and whether `s3_uri`/`size_bytes` are populated (they were, confirming the checkpoint itself succeeded), not from the status value alone.
+
+No code-level fix — same operational mitigation as limitation 2: anything a tracked command needs on disk (its own script file included, if invoked by path rather than baked into the AMI as a compiled binary) must already exist identically on any instance that might ever restore it, not just the one it started on.
+
+## 22. SSM RunCommand's CloudWatch output needs `logs:CreateLogGroup` on the bare log-group ARN, even when the group already exists
+
+Found wiring up CloudWatch Logs for troubleshooting (`infra/terraform/cloudwatch.tf`): granting the instance role `logs:CreateLogStream`/`PutLogEvents`/`DescribeLogStreams` scoped to `<log-group-arn>:*` (the correct scoping for those, stream-level, actions) was not sufficient for SSM's `CloudWatchOutputConfig` — commands still ran successfully, but no log stream for their output ever appeared, with no error visible from `send-command`/`get-command-invocation` at all. The actual cause only showed up in the instance's own `/var/log/amazon/ssm/amazon-ssm-agent.log`:
+```
+ERROR ... Error Creating Log Group for CloudWatchLogs output: AccessDeniedException: ... not authorized to perform: logs:CreateLogGroup on resource: arn:aws:logs:<region>:<account>:log-group:<name> because no identity-based policy allows the logs:CreateLogGroup action
+```
+The SSM agent unconditionally attempts `logs:CreateLogGroup` against the *bare* group ARN (no `:*` suffix) before writing anything, regardless of whether the group already exists — and a resource pattern ending `:*` does not match the bare ARN (the literal `:` immediately before the wildcard has nothing to match against). Fixed by granting `logs:CreateLogGroup` explicitly against the bare ARN alongside the existing stream-level grant against the `:*` form. Worth knowing for any similar SSM/CloudWatch wiring: check the *agent's own* local log when delivery silently doesn't happen, not just the command's own result.

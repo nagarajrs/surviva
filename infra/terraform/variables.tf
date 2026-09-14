@@ -73,6 +73,12 @@ variable "tags" {
   default     = {}
 }
 
+variable "log_retention_days" {
+  description = "How long CloudWatch keeps the surviva daemon/restore log group's events."
+  type        = number
+  default     = 14
+}
+
 variable "create_fis_demo_template" {
   description = "Whether to create a dormant AWS Fault Injection Simulator experiment template (plus its execution role) pre-configured to send a real Spot interruption to fis_target_instance_arn. Never auto-run by Terraform; fire it yourself with `aws fis start-experiment` whenever you're ready. Leave false for a normal deployment -- this is only useful for the ansible sandbox / manual validation."
   type        = bool

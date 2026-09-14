@@ -7,8 +7,10 @@ Wants=network-online.target
 ExecStart=/usr/local/bin/surviva-boot.sh
 Restart=on-failure
 RestartSec=5
-StandardOutput=journal
-StandardError=journal
+# A plain file (not journal) so the CloudWatch Agent can tail it with a
+# simple file-based log config -- see cwagent-config.json.j2.
+StandardOutput=append:/var/log/surviva-daemon.log
+StandardError=append:/var/log/surviva-daemon.log
 
 [Install]
 WantedBy=multi-user.target

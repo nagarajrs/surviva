@@ -36,6 +36,27 @@ data "aws_iam_policy_document" "instance" {
     resources = ["*"] # DescribeVolumes has no useful resource-level restriction
   }
 
+  statement {
+    # The instance's own role, not the state machine's, is what SSM
+    # RunCommand's CloudWatch output feature and the CloudWatch Agent (for
+    # the daemon's own ongoing log) actually use -- both act as this
+    # instance, not as the orchestrator. Found the hard way against a real
+    # SSM RunCommand: it unconditionally attempts logs:CreateLogGroup on
+    # the *bare* log-group ARN (no ":*" suffix) before ever writing
+    # anything, even when the group already exists -- omitting that action
+    # (or scoping only the ":*" stream-level ARN, which doesn't match a
+    # bare-ARN request) fails the whole delivery with "AccessDeniedException
+    # ... not authorized to perform: logs:CreateLogGroup" and the SSM
+    # command's own output/status is unaffected, so it looks like nothing
+    # is wrong until you go looking for the (never-created) log stream.
+    sid     = "WriteSurvivaLogs"
+    actions = ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents", "logs:DescribeLogStreams"]
+    resources = [
+      aws_cloudwatch_log_group.surviva.arn,
+      "${aws_cloudwatch_log_group.surviva.arn}:*",
+    ]
+  }
+
   dynamic "statement" {
     for_each = var.enable_s3_bucket ? [1] : []
     content {

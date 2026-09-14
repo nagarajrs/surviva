@@ -54,6 +54,10 @@ If you start a protected program directly in your own terminal session (rather t
 
 Two things compound here, both found through real testing. First, because a protected program is deliberately isolated from the terminal it started in (so it can be safely frozen and resumed on different hardware later), your terminal's Ctrl+C doesn't automatically reach it — it was only reaching surviva's own tracking wrapper, which does nothing to the actual program. Second, and unrelated to surviva: many programs (like shell scripts), when running in the background, are specifically designed by the underlying operating system to ignore Ctrl+C-style interruptions — this is standard, deliberate Unix behavior, not a bug. Together, this meant pressing Ctrl+C could silently do nothing, while surviva's own records kept insisting the program was still running long after you'd tried to stop it. This has been fixed — surviva now properly passes along a stronger "please stop" signal that isn't subject to that background-ignoring behavior, so Ctrl+C reliably stops the program again.
 
+## A protected script itself, not just its output, needs to travel with it
+
+Similar to the "output needs somewhere safe to go" issue above, but for the program's own source file: if what you're protecting is a script (rather than a single ready-to-go program), the freeze-and-resume technology needs that exact script file to still be sitting at the exact same location on the replacement machine — the same way it needs the output destination to already exist there. If it was only ever placed on the original machine by hand, resuming will fail once it's moved to a new machine. Saving still works fine (confirmed for real); it's specifically the resume step that needs the script's home to already be prepared on any machine it might land on, which usually means baking it into the starting "image" ahead of time rather than adding it by hand after the fact.
+
 ---
 
 For the deeper technical reasoning behind some of these tradeoffs, see the project's design-record document. For how the pieces fit together, see the architecture document.

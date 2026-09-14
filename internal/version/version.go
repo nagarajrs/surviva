@@ -7,4 +7,4 @@ package version
 // for significant/breaking changes, the minor number for everything else.
 // Bumped by hand per release, matching a git branch of the same name --
 // there is no build-time injection (no CI/release pipeline exists yet).
-const Version = "v1.1"
+const Version = "v1.2"

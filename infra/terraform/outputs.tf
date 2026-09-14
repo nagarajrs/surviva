@@ -25,3 +25,8 @@ output "fis_experiment_template_id" {
   description = "Fire with `aws fis start-experiment --experiment-template-id <this>`, if create_fis_demo_template is true."
   value       = var.create_fis_demo_template ? aws_fis_experiment_template.spot_interruption[0].id : null
 }
+
+output "cloudwatch_log_group_name" {
+  description = "The daemon's own ongoing log (every instance) and each restore attempt's command output (via CloudWatchOutputConfig) both land here -- `aws logs tail <this> --follow`."
+  value       = aws_cloudwatch_log_group.surviva.name
+}

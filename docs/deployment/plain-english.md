@@ -30,6 +30,8 @@ That means most of the deployment effort happens **once, ahead of time**: buildi
 
 7. **Test it before you trust it.** Before relying on this for real, valuable work, it's strongly recommended to simulate a real interruption using AWS's own fault-testing tool and confirm the whole cycle — save, replace, resume — actually completes. This was done for this project and it caught two real configuration mistakes that a "looks correct on paper" review would have missed. Testing it for real, not just reading the setup, is what actually builds confidence.
 
+8. **Set up a place to see what happened, after the fact.** Every computer surviva protects (the original and any automatic replacement) can ship its own ongoing activity log to one central place (AWS CloudWatch Logs), and each resume attempt's own output lands there too — so if something goes wrong, there's somewhere to actually look, even if the machine involved is long gone by the time you notice.
+
 8. **Tearing it down** when you're done is the reverse of setup: remove the shared infrastructure, the recipe, the starter image, and any computers still running.
 
 ## The big lesson from testing this for real

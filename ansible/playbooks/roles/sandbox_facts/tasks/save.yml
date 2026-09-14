@@ -28,6 +28,7 @@
         'fis_experiment_template_id': tf_outputs.fis_experiment_template_id | default(None),
         'checkpoints_bucket_name': tf_outputs.checkpoints_bucket_name | default(None),
         'jobs_table_name': tf_outputs.jobs_table_name | default(None),
+        'cloudwatch_log_group_name': tf_outputs.cloudwatch_log_group_name | default(None),
       } | to_nice_json }}
 
 - name: Build the FIS fire command, if a template was created
@@ -46,5 +47,6 @@
       - "Track a job:     surviva run -- <your command>"
       - "List jobs:       surviva list"
       - "{{ 'Fire a real Spot interruption: ' + _fis_fire_cmd if _fis_fire_cmd is defined else 'FIS demo template not created (create_fis_demo_template is false).' }}"
+      - "Tail logs:       aws logs tail {{ tf_outputs.cloudwatch_log_group_name }} --follow --region {{ aws_region }}"
       - "Facts saved to:  {{ facts_file }}"
       - "When you're done: ansible-playbook playbooks/destroy_sandbox.yml"

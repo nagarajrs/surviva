@@ -64,8 +64,8 @@ Wants=network-online.target
 ExecStart=/usr/local/bin/surviva-boot.sh
 Restart=on-failure
 RestartSec=5
-StandardOutput=journal
-StandardError=journal
+StandardOutput=append:/var/log/surviva-daemon.log
+StandardError=append:/var/log/surviva-daemon.log
 
 [Install]
 WantedBy=multi-user.target
@@ -75,6 +75,38 @@ WantedBy=multi-user.target
 systemctl daemon-reload
 systemctl enable surviva-daemon   # enable, don't start — no user-data exists on the builder itself
 ```
+
+**CloudWatch Agent** (optional but recommended — ships the daemon's log above to the log group `infra/terraform`'s `cloudwatch.tf` creates, `/surviva/<name_prefix>`, so troubleshooting a checkpoint/restore failure doesn't depend on SSM access to an instance that may already be gone):
+
+```bash
+dnf install -y amazon-cloudwatch-agent
+cat > /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json <<'EOF'
+{
+  "agent": { "run_as_user": "root" },
+  "logs": {
+    "logs_collected": {
+      "files": {
+        "collect_list": [
+          {
+            "file_path": "/var/log/surviva-daemon.log",
+            "log_group_name": "/surviva/<name_prefix>",
+            "log_stream_name": "{instance_id}/daemon",
+            "timestamp_format": "2006/01/02 15:04:05"
+          }
+        ]
+      }
+    }
+  }
+}
+EOF
+/opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
+  -a fetch-config -m ec2 -s \
+  -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json
+systemctl stop amazon-cloudwatch-agent   # -s above starts it to validate the config; stop it again
+systemctl enable amazon-cloudwatch-agent # so it starts fresh at boot on every real instance
+```
+
+The instance role needs `logs:CreateLogGroup`/`CreateLogStream`/`PutLogEvents`/`DescribeLogStreams` on the log group for this (and for `SendRestoreCommand`'s own `CloudWatchOutputConfig`) to work — see `iam.tf`'s `WriteSurvivaLogs` statement, and limitation 22 for a real IAM gotcha found wiring this up (`CreateLogGroup` needs the *bare* log-group ARN granted separately from the `:*` stream-level form, or delivery fails completely silently from the caller's side).
 
 **Create the image:**
 

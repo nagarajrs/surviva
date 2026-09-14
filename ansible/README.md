@@ -62,6 +62,8 @@ CRIU from source — expect 10-15 minutes total). When it finishes it prints:
 - how to track your own job (`surviva run -- <your command>`)
 - the exact `aws fis start-experiment` command to fire a real Spot
   interruption and watch the self-healing loop run
+- how to tail the daemon's log and every restore attempt's own output,
+  centrally, via `aws logs tail`
 - how to tear it all down
 
 Resource ids are also cached locally in the (gitignored) `.sandbox_facts/`
@@ -76,7 +78,18 @@ or anywhere else instance-local won't be there after a real interruption,
 and restore will fail outright. Redirect output to `/dev/null` (present on
 every instance identically), or pick a command that doesn't touch the
 filesystem at all, such as the bundled demo job (`sleep`, discoverable via
-`surviva list`).
+`surviva list`). The same rule applies to the command itself, not just its
+output: a script invoked by path (`./my-script.sh`) needs that exact file to
+already exist on any instance that might restore it — a script you added by
+hand only on the original instance will checkpoint fine but fail to restore
+with a "No such file or directory" error naming the script itself, not your
+output file.
+
+**Troubleshooting:** every instance's daemon log, and each restore attempt's
+own command output, land in one CloudWatch Logs group
+(`aws logs tail /surviva/<name_prefix> --follow --region <region>` — the
+exact command is in the setup summary) — useful since the instance a
+failure happened on may already be gone by the time you go looking.
 
 When you're done:
 

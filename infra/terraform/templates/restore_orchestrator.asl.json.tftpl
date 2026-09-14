@@ -233,6 +233,10 @@
               "DocumentName": "${restore_ssm_document}",
               "Parameters": {
                 "commands": ["{% '${restore_command_prefix} ' & $item.job_id.S %}"]
+              },
+              "CloudWatchOutputConfig": {
+                "CloudWatchLogGroupName": "${cloudwatch_log_group_name}",
+                "CloudWatchOutputEnabled": true
               }
             },
             "End": true
