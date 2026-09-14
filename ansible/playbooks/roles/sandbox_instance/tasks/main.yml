@@ -88,7 +88,7 @@
       # would exist on the original instance but not a replacement, and
       # restore would fail outright (found the hard way against a real FIS
       # interruption test). /dev/null exists identically everywhere.
-      nohup /usr/local/bin/surviva run --priority 5 -- sleep 3600 < /dev/null > /dev/null 2>&1 &
+      nohup /usr/local/bin/surviva run --priority 5 -- sleep 300 < /dev/null > /dev/null 2>&1 &
       disown
       sleep 1
       /usr/local/bin/surviva list

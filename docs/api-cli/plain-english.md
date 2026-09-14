@@ -42,7 +42,11 @@ Two optional extras:
   "how to bring it back" scripts instead.
 
 If the background daemon isn't running for some reason, `surviva run` doesn't
-block your command — it just runs it unprotected and warns you.
+block your command — it just runs it unprotected and warns you. The same
+thing happens if you try to start a new job *after* a Spot warning has
+already arrived: it's too late for that job to be saved along with
+everything else, so surviva says so plainly and runs it unprotected rather
+than pretending it's covered.
 
 ## `surviva daemon` — the background watcher
 

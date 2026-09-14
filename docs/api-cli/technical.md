@@ -67,6 +67,17 @@ Behavior:
    `errors.As(waitErr, &exec.ExitError)`).
 6. If the daemon is unreachable at registration time, prints a warning to
    stderr and proceeds anyway — the command still runs, just unprotected.
+   The daemon also refuses (same warn-and-continue path) any registration
+   after it has already handled a rebalance recommendation or interruption
+   notice this run — a job registered from that point on has no realistic
+   path to being checkpointed before reclamation (see `internal/daemon`'s
+   `interrupted` latch), so `surviva run` runs the command anyway rather
+   than blocking it outright, but says plainly that it won't be protected.
+7. Also catches SIGINT/SIGTERM and forwards `SIGTERM` to the child's whole
+   process group (`internal/procsignal`) before returning — needed because
+   the child's own session (step 1) means a terminal's Ctrl+C never reaches
+   it directly, and a backgrounded shell script ignores SIGINT for itself
+   regardless (a POSIX rule, not a surviva quirk) but not SIGTERM.
 
 Race note: if the daemon starts checkpointing the job at the same instant
 `surviva run` sees `cmd.Wait()` return (because `criu dump` stopped the

@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -80,6 +81,14 @@ type Daemon struct {
 	statusStore              *remote.StatusStore
 	objectStore              *remote.ObjectStore
 	ebsVolumeID              string
+	// interrupted latches true the moment a rebalance recommendation or
+	// interruption notice is ever received (see handleInterruption). A job
+	// registered after that point has no realistic path to being
+	// checkpointed: each IMDS signal only ever triggers handleInterruption
+	// once per daemon run (see imds.Poller), so a newly-tracked job would
+	// simply be silently lost when the instance is actually reclaimed,
+	// despite `surviva run` having reported it as protected.
+	interrupted atomic.Bool
 }
 
 // New opens the job store and prepares a daemon to listen on cfg.SocketPath,
@@ -233,6 +242,14 @@ func (d *Daemon) dispatch(req ipc.Request) ipc.Response {
 		if req.Job == nil {
 			return ipc.Response{OK: false, Error: "missing job payload"}
 		}
+		if d.interrupted.Load() {
+			// A rebalance recommendation or interruption notice has already
+			// fired this daemon run -- handleInterruption only ever runs
+			// once per signal type, so a job registered from this point on
+			// would never actually get checkpointed before the instance is
+			// reclaimed, despite `surviva run` reporting it as tracked.
+			return ipc.Response{OK: false, Error: "daemon has already received a Spot interruption/rebalance signal; refusing new job registrations"}
+		}
 		id := idgen.New()
 		now := time.Now().UTC()
 		j := job.Job{
@@ -337,6 +354,11 @@ func (d *Daemon) dispatch(req ipc.Request) ipc.Response {
 // so priority determines who gets checkpointed first if time runs out
 // mid-way rather than which goroutine happens to be scheduled first.
 func (d *Daemon) handleInterruption(trigger string) {
+	// Latched immediately, before anything else: refusing new registrations
+	// (see ActionRegister) matters most in exactly the window this function
+	// is about to spend checkpointing, not after it returns.
+	d.interrupted.Store(true)
+
 	jobs, err := d.store.List()
 	if err != nil {
 		log.Printf("checkpoint: failed to list jobs (trigger=%s): %v", trigger, err)
