@@ -1,7 +1,7 @@
 # The `surviva` command-line tool — plain-English guide
 
-`surviva` is a single program with five modes ("subcommands"). You always start
-with `surviva`, then tell it which of the five things you want it to do.
+`surviva` is a single program with six modes ("subcommands"). You always start
+with `surviva`, then tell it which of the six things you want it to do.
 
 | Command | What it's for |
 |---|---|
@@ -10,6 +10,7 @@ with `surviva`, then tell it which of the five things you want it to do.
 | `surviva list` | Show what jobs are currently being watched on this machine. |
 | `surviva stop` | Stop a job and remove it from tracking. |
 | `surviva restore` | Bring a saved job back to life on a new machine. |
+| `surviva version` | Print which version of surviva you're running. |
 
 A quick refresher on the vocabulary: a **checkpoint** is a snapshot of a running
 program — its memory, open files, everything it needs to pick up exactly where
@@ -75,10 +76,12 @@ long gone, yet `surviva list` still insists it's running, because nothing
 else in the system ever checks whether that's actually still true.
 `surviva stop <job-id>` fixes that directly — it stops the actual program and
 removes it from the list in one step, no matter what happened to whatever was
-originally supervising it. It only works on a job that's still genuinely
-running; it refuses to touch one that's in the middle of being saved, or
-already saved successfully, since removing that record could make a
-legitimate save impossible to recover later.
+originally supervising it. Use the exact ID shown in the `JOB ID` column of
+`surviva list` — not the PID next to it — and if that ID doesn't actually
+exist, it tells you so rather than pretending it worked. It only works on a
+job that's still genuinely running; it refuses to touch one that's in the
+middle of being saved, or already saved successfully, since removing that
+record could make a legitimate save impossible to recover later.
 
 ## `surviva restore` — bring a job back
 

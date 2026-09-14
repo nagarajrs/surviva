@@ -289,7 +289,13 @@ func (d *Daemon) dispatch(req ipc.Request) ipc.Response {
 		}
 		existing, err := d.store.Get(req.JobID)
 		if err != nil {
-			return ipc.Response{OK: true} // already gone; stop is idempotent
+			// Unlike deregister, an unknown id here is reported as a real
+			// error, not silently treated as success: `stop` is a one-off
+			// command a person typed, and a wrong or mistyped job id
+			// (a PID, a truncated id, one that never existed) silently
+			// "succeeding" is actively misleading -- it looks exactly like
+			// the job really was stopped when nothing happened at all.
+			return ipc.Response{OK: false, Error: fmt.Sprintf("no such job: %s", req.JobID)}
 		}
 		// Unlike deregister (which only ever races a job's own `surviva run`
 		// wrapper over a job that's still RUNNING), stop is a deliberate,

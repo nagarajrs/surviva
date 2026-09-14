@@ -1,11 +1,11 @@
 # `surviva` CLI reference
 
-Single binary, five subcommands: `run`, `daemon`, `list`, `stop`, `restore`.
-Flags use Go's standard `flag` package (single-dash, `-h` per subcommand for a
-live list).
+Single binary, six subcommands: `run`, `daemon`, `list`, `stop`, `restore`,
+`version`. Flags use Go's standard `flag` package (single-dash, `-h` per
+subcommand for a live list).
 
 ```
-surviva - checkpoint/restore protection for Spot interruptions
+surviva v1.0 - checkpoint/restore protection for Spot interruptions
 
 Usage:
   surviva run [flags] -- <command> [args...]   Run and track a command
@@ -13,9 +13,15 @@ Usage:
   surviva list [flags]                         List jobs tracked by the daemon
   surviva stop [flags] <job-id>                Terminate and untrack a RUNNING job
   surviva restore [flags] <job-id>             Restore a checkpointed job on this instance
+  surviva version                              Print the surviva version
 
 Run 'surviva <command> -h' for flags on a specific subcommand.
 ```
+
+`surviva version` (also `surviva -v`/`-version`/`--version`) prints `surviva
+<version>` and exits 0. The version (`internal/version.Version`, MAJOR.MINOR)
+is bumped by hand per release, matching a git branch of the same name — there
+is no CI/release pipeline injecting it at build time.
 
 Exit codes, all subcommands: `0` success; `1` general failure (also used to
 propagate the wrapped command's own nonzero exit code in `run`); `2` usage
@@ -152,14 +158,17 @@ Sends `SIGTERM` to the job's whole process group and removes it from
 tracking — the daemon does this directly, so it works even if the `surviva
 run` that registered the job is no longer around to deregister it itself
 (killed directly, a dropped session, or anything else that orphaned the
-record). Deliberately **not the same code path** as a normal exit: refuses
-(exit 1) once the job's status is anything other than `RUNNING` — a
-checkpoint in progress or already durable is owned by the checkpoint/restore
-subsystem from that point on, and ripping the record out from under it would
-be actively harmful, not just redundant. Idempotent: stopping an
-already-gone job id is a no-op success (exit 0), and a process group that no
-longer exists is treated the same way — there's simply nothing left to
-signal.
+record). Takes a **job ID** (the `JOB ID` column from `surviva list`), not a
+PID — passing a PID, a mistyped id, or any id that doesn't exist is reported
+as `no such job: <id>` (exit 1) rather than silently "succeeding", since a
+one-off command a person typed getting no error on the wrong input is
+actively misleading. Also refuses (exit 1) once a real job's status is
+anything other than `RUNNING` — a checkpoint in progress or already durable
+is owned by the checkpoint/restore subsystem from that point on, and ripping
+the record out from under it would be actively harmful, not just redundant.
+A process group that's already dead by the time the signal is sent (e.g. it
+exited right as the request arrived) is not an error — there's simply
+nothing left to signal, and the record is still removed.
 
 ```
 surviva stop 6a81d8ec-6d1a-4d99-bd8e-259b44ebab53
