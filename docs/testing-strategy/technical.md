@@ -219,6 +219,27 @@ All temporary AWS resources created for this round (1 EC2 instance, IAM role/pro
 staging bucket) were deleted and confirmed gone afterward. Full rationale for the version
 choice and switch is in `../design-record/technical.md`.
 
+## Post-launch: CloudWatch Logs for troubleshooting
+
+Added after a live user-reported restore failure was harder to diagnose than it should have
+been (required SSM access to an instance that could easily have already been gone). Verified
+against the actual running ansible sandbox, not just planned/reviewed:
+
+- Applied the real Terraform change (`cloudwatch.tf`, the IAM statement, `SendRestoreCommand`'s
+  `CloudWatchOutputConfig`) to a live, already-deployed orchestrator via `terraform apply`.
+- Installed and configured the CloudWatch Agent by hand on the live sandbox instance, matching
+  exactly what the AMI bake now automates; wrote a test line to the daemon's log file and
+  confirmed it actually reached the log group (`aws logs get-log-events`).
+- Sent a real `aws ssm send-command` with `--cloud-watch-output-config` against the same
+  instance to validate the restore-command delivery path independently.
+- The second check failed on the first attempt — command ran fine, but no log stream ever
+  appeared. Root-caused via the instance's own `/var/log/amazon/ssm/amazon-ssm-agent.log` (not
+  visible anywhere in the command's own result) to a missing `logs:CreateLogGroup` grant on the
+  bare log-group ARN — the IAM statement only covered the (correctly-scoped, but insufficient
+  alone) `:*` stream-level form. Fixed the policy, re-applied, re-ran the same SSM command, and
+  confirmed the log stream and its content now appear. See `../design-record/technical.md`
+  (ADR-16) and `../limitations/technical.md` (item 22).
+
 ## What is explicitly NOT covered yet
 
 - **No automated regression test suite or CI pipeline.** Every verification above was a

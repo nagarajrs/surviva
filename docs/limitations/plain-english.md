@@ -58,6 +58,10 @@ Two things compound here, both found through real testing. First, because a prot
 
 Similar to the "output needs somewhere safe to go" issue above, but for the program's own source file: if what you're protecting is a script (rather than a single ready-to-go program), the freeze-and-resume technology needs that exact script file to still be sitting at the exact same location on the replacement machine — the same way it needs the output destination to already exist there. If it was only ever placed on the original machine by hand, resuming will fail once it's moved to a new machine. Saving still works fine (confirmed for real); it's specifically the resume step that needs the script's home to already be prepared on any machine it might land on, which usually means baking it into the starting "image" ahead of time rather than adding it by hand after the fact.
 
+## A permissions gap can make troubleshooting logs silently never show up
+
+While setting up central logging (see the deployment guide), granting a machine permission to *write log entries* to an existing logging destination turned out not to be enough — AWS's remote-command tool also insists on permission to *create* that destination, even when it already exists, and refuses to send any logs there at all if that specific permission is missing. Nothing about running the actual command indicated a problem; the only clue was buried in that machine's own internal activity log. Fixed by granting the extra permission. Worth remembering generally: if logs you expect never show up somewhere, and everything otherwise looks like it worked, check the machine's own local logs for the real reason before assuming it's broken in some more complicated way.
+
 ---
 
 For the deeper technical reasoning behind some of these tradeoffs, see the project's design-record document. For how the pieces fit together, see the architecture document.

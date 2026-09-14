@@ -73,6 +73,19 @@ where that earlier broken version had been found. It passed cleanly, needed one 
 addition to how it's built, and no longer needed an earlier workaround at all. The switch
 was made only after that real test passed, not before.
 
+## Adding a central troubleshooting logbook, tested the same way
+
+After a real user hit a resume failure that was harder to diagnose than it should have been
+(the machine involved could easily be long gone by the time anyone investigates), the project
+added one shared logbook every machine's activity — and every resume attempt's own output —
+gets written to. This wasn't just built and assumed to work: the change was applied to a real,
+already-running practice setup, a test entry was written and confirmed to actually show up in
+the shared logbook, and a real remote command was sent to confirm its output arrived there too.
+That second check actually failed the first time — the command itself ran fine, but nothing
+showed up in the logbook — and the real reason (a missing permission, visible only in that
+machine's own private activity log, not anywhere the command's own result showed) was found and
+fixed before calling it done.
+
 ## What hasn't been tested yet (being honest about it)
 
 This system has been proven to work, end to end, for real — once. That's meaningfully
