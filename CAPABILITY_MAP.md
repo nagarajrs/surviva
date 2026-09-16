@@ -43,3 +43,8 @@ can't be checkpointed at all — a CRIU constraint, not a bug).
 See [README.md](README.md) for a quick start and [DEPLOYMENT.md](DEPLOYMENT.md)
 for building CRIU, installing the systemd unit, and IAM for the optional
 notify target.
+
+CI (`.github/workflows/ci.yml`) runs `gofmt`/`go build`/`go vet`/`go test
+./...` plus a shell-syntax check on every push/PR — a floor, not full
+coverage: CRIU/MySQL/AWS all need real infra per each module's own testing
+strategy above, so that verification stays manual, same as it's always been.

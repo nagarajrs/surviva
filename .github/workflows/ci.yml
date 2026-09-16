@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: [master, dev]
+  pull_request:
+
+jobs:
+  build-test:
+    name: build, vet, test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: gofmt
+        # Scoped to the redesigned tree -- legacy/ predates gofmt enforcement
+        # and is kept as-is (see legacy/README.md), not reformatted here.
+        run: |
+          UNFORMATTED="$(gofmt -l ./cmd ./internal)"
+          if [ -n "$UNFORMATTED" ]; then
+            echo "gofmt needs to be run on:"
+            echo "$UNFORMATTED"
+            exit 1
+          fi
+
+      - name: build
+        run: go build ./...
+
+      - name: vet
+        run: go vet ./...
+
+      - name: test
+        run: go test ./...
+
+  shellcheck-syntax:
+    name: shell script syntax
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: bash -n
+        run: |
+          for f in deploy/install.sh hooks/examples/*.sh; do
+            echo "checking $f"
+            bash -n "$f"
+          done
