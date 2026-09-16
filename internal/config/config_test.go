@@ -99,6 +99,31 @@ DBPath=/z
 	}
 }
 
+func TestLoadOptionalMaxConcurrentCheckpoints(t *testing.T) {
+	// Absent: defaults to zero (daemon decides its own default).
+	cfg, err := Load(writeConf(t, validConf))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.MaxConcurrentCheckpoints != 0 {
+		t.Errorf("MaxConcurrentCheckpoints = %d, want 0 (unset)", cfg.MaxConcurrentCheckpoints)
+	}
+
+	// Present: parsed and validated like any other int directive.
+	cfg, err = Load(writeConf(t, validConf+"\nMaxConcurrentCheckpoints=4\n"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.MaxConcurrentCheckpoints != 4 {
+		t.Errorf("MaxConcurrentCheckpoints = %d, want 4", cfg.MaxConcurrentCheckpoints)
+	}
+
+	// Invalid value rejected like any other required int would be.
+	if _, err := Load(writeConf(t, validConf+"\nMaxConcurrentCheckpoints=0\n")); err == nil {
+		t.Error("expected error for MaxConcurrentCheckpoints=0")
+	}
+}
+
 func TestLoadUnrecognizedProvider(t *testing.T) {
 	path := writeConf(t, `
 CloudProvider=digitalocean

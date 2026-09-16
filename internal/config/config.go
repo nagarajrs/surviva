@@ -18,6 +18,10 @@ type Config struct {
 	AuditLogPath      string
 	CheckpointBaseDir string
 	DBPath            string
+	// MaxConcurrentCheckpoints bounds how many jobs are checkpointed at once
+	// during an interruption fan-out. Optional; 0 means "let daemon default
+	// it" (runtime.NumCPU() -- see SPEC-daemon.md).
+	MaxConcurrentCheckpoints int
 }
 
 // supportedCloudProviders are recognized directive values for CloudProvider.
@@ -79,11 +83,12 @@ func Load(path string) (Config, error) {
 // matched case-insensitively; this map is the single source of truth for
 // "is this a real directive."
 var knownKeys = map[string]bool{
-	"CLOUDPROVIDER":       true,
-	"POLLINTERVALSECONDS": true,
-	"AUDITLOGPATH":        true,
-	"CHECKPOINTBASEDIR":   true,
-	"DBPATH":              true,
+	"CLOUDPROVIDER":            true,
+	"POLLINTERVALSECONDS":      true,
+	"AUDITLOGPATH":             true,
+	"CHECKPOINTBASEDIR":        true,
+	"DBPATH":                   true,
+	"MAXCONCURRENTCHECKPOINTS": true,
 }
 
 func validate(path string, raw map[string]string) (Config, error) {
@@ -125,6 +130,14 @@ func validate(path string, raw map[string]string) (Config, error) {
 	cfg.DBPath, ok = raw["DBPATH"]
 	if !ok {
 		return Config{}, fmt.Errorf("%s: missing required directive DBPath", path)
+	}
+
+	if maxRaw, ok := raw["MAXCONCURRENTCHECKPOINTS"]; ok {
+		n, err := strconv.Atoi(maxRaw)
+		if err != nil || n <= 0 {
+			return Config{}, fmt.Errorf("%s: MaxConcurrentCheckpoints must be a positive integer, got %q", path, maxRaw)
+		}
+		cfg.MaxConcurrentCheckpoints = n
 	}
 
 	return cfg, nil
