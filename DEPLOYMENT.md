@@ -5,6 +5,40 @@ here has actually been run — this isn't a guess at what should work, it's
 the same sequence used to verify each module against real CRIU, a real
 MySQL server, and real AWS Lambda/Step Functions during development.
 
+## One-shot install
+
+[`deploy/install.sh`](deploy/install.sh) automates steps 1–5 below (build,
+install CRIU, create directories, write a basic SQLite-backed
+`surviva.conf`, install and start the systemd unit) on Ubuntu/Debian,
+RHEL-family (RHEL/CentOS/Rocky/Alma/Fedora), or Amazon Linux (2 or 2023).
+Idempotent — safe to re-run; never overwrites an existing `surviva.conf`.
+Run it from inside a checked-out repo, as root:
+
+```bash
+git clone https://github.com/nagarajrs/surviva.git
+cd surviva
+git checkout dev
+sudo ./deploy/install.sh
+```
+
+`CLOUD_PROVIDER`/`POLL_INTERVAL_SECONDS` env vars override the generated
+config's defaults (`aws`/`5`). It does **not** set up MySQL or the Lambda/
+Step Functions notify target — add those to `/etc/surviva/surviva.conf` by
+hand afterward, per steps 3–4 below, then `sudo systemctl restart
+surviva-daemon`.
+
+**Verified against real infra:** Ubuntu (WSL2 and bare systemd), end to
+end including a re-run for idempotency. The RHEL-family/Amazon Linux
+branches use the same CRIU-build sequence with the analogous `dnf`/`yum`
+package names (best-effort EPEL enablement — see the script's comments)
+but haven't been run against a real RHEL/Amazon Linux box yet; if a
+package name turns out wrong for your distro version, the fix is a
+one-line edit to the `amzn|rhel` case in the script.
+
+The manual steps below are what the script automates — useful if you want
+to understand or customize what it's doing, or you're on a distro it
+doesn't recognize.
+
 ## 1. Build
 
 ```bash
