@@ -1,17 +1,19 @@
 # `surviva` CLI reference
 
-Single binary, six subcommands: `run`, `daemon`, `list`, `stop`, `restore`,
-`version`. Flags use Go's standard `flag` package (single-dash, `-h` per
-subcommand for a live list).
+Single binary, eight subcommands: `run`, `daemon`, `list`, `stop`, `pause`,
+`resume`, `restore`, `version`. Flags use Go's standard `flag` package
+(single-dash, `-h` per subcommand for a live list).
 
 ```
-surviva v1.0 - checkpoint/restore protection for Spot interruptions
+surviva v1.3 - checkpoint/restore protection for Spot interruptions
 
 Usage:
   surviva run [flags] -- <command> [args...]   Run and track a command
   surviva daemon [flags]                       Run the surviva daemon
   surviva list [flags]                         List jobs tracked by the daemon
   surviva stop [flags] <job-id>                Terminate and untrack a RUNNING job
+  surviva pause [flags] <job-id>               Checkpoint a RUNNING job on demand
+  surviva resume [flags] <job-id>              Resume a checkpointed job from local disk
   surviva restore [flags] <job-id>             Restore a checkpointed job on this instance
   surviva version                              Print the surviva version
 
@@ -183,6 +185,86 @@ nothing left to signal, and the record is still removed.
 
 ```
 surviva stop 6a81d8ec-6d1a-4d99-bd8e-259b44ebab53
+```
+
+---
+
+## `surviva pause [flags] <job-id>`
+
+| Flag | Type | Default | Description |
+|---|---|---|---|
+| `-socket` | string | `DefaultSocketPath()` | Daemon socket to talk to. |
+| `-local` | bool | `false` | Store the checkpoint on local disk only for this job, skipping S3/EBS even if the daemon is configured for one of them. |
+
+Checkpoints a job on demand — the same `checkpoint.Run` (CRIU dump, or the
+job's `--hook-checkpoint`) that an interruption notice would trigger, just
+run for one job, right now, because a person asked for it instead of AWS.
+Like the automatic path, the process is stopped as part of the dump (no
+`--leave-running`) — pausing really does pause it.
+
+Requires the job to be `RUNNING` (same rule as `stop`): refuses with
+`"refusing to pause job <id>: status is <status>, not RUNNING"` otherwise. An
+unknown job id is `"no such job: <id>"` (exit 1), matching `stop`'s
+not-silently-successful behavior. Also refused, exit 1, if the daemon has
+already latched an interruption/rebalance signal this run (`"daemon has
+already received a Spot interruption/rebalance signal; automatic
+checkpointing is in progress, refusing manual pause"`) — at that point
+`handleInterruption` may already be checkpointing every `RUNNING` job,
+including this one, and a concurrent manual pause would race it.
+
+Without `-local`, storage follows whatever the daemon is already configured
+with (S3, EBS, or local-disk-only if neither is set) — exactly like an
+interruption-triggered checkpoint. With `-local`, the checkpoint is left on
+local disk only, with no S3 push, no EBS durability record, and no DynamoDB
+entry, regardless of the daemon's own configuration. See
+`../limitations/technical.md` for the tradeoff this makes: a `-local`
+checkpoint does not survive losing the instance.
+
+On success, prints where the checkpoint landed, e.g.:
+
+```
+surviva pause 6a81d8ec-6d1a-4d99-bd8e-259b44ebab53
+surviva pause: paused job 6a81d8ec-6d1a-4d99-bd8e-259b44ebab53: checkpoint pushed to S3
+
+surviva pause -local 6a81d8ec-6d1a-4d99-bd8e-259b44ebab53
+surviva pause: paused job 6a81d8ec-6d1a-4d99-bd8e-259b44ebab53: checkpoint stored locally at /var/lib/surviva/checkpoints/6a81d8ec-6d1a-4d99-bd8e-259b44ebab53
+```
+
+---
+
+## `surviva resume [flags] <job-id>`
+
+| Flag | Type | Default | Description |
+|---|---|---|---|
+| `-socket` | string | `DefaultSocketPath()` | Daemon socket to talk to. |
+
+Resumes a `CHECKPOINT_COMPLETE` job straight from the local checkpoint
+directory the daemon dumped it into (`internal/checkpoint.Dir`), on **this
+same instance** — no AWS calls, no DynamoDB record required. This is the
+manual counterpart to `surviva pause`, meant for resuming a job someone
+paused (or that was interruption-checkpointed) without ever leaving the box,
+including checkpoints made with `pause -local` that have no remote record at
+all.
+
+It is deliberately not the same command as `surviva restore`: `restore`
+recovers a job onto a *different*, replacement instance from its S3/EBS +
+DynamoDB record, and refuses to run without `-dynamodb-table`. `resume` never
+needs that — it only requires the local checkpoint images to still be on
+disk, which they always are immediately after any checkpoint (S3/EBS pushes
+never delete the local copy).
+
+Refuses with `"refusing to resume job <id>: status is <status>, not
+CHECKPOINT_COMPLETE"` if the job isn't in that state, `"no such job: <id>"`
+for an unknown id, and `"no local checkpoint for job <id> at <dir> -- use
+\`surviva restore\` on the target instance instead"` if the local images are
+missing (e.g. this job was actually resumed on a different instance via
+`restore`). On success, the job keeps its original id, its `pid`/`pgid` are
+updated to the newly-resumed process, and its status returns to `RUNNING` —
+unlike `restore`, which registers the resumed process as a brand new job id.
+
+```
+surviva resume 6a81d8ec-6d1a-4d99-bd8e-259b44ebab53
+surviva resume: job 6a81d8ec-6d1a-4d99-bd8e-259b44ebab53 resumed as pid 4821
 ```
 
 ---

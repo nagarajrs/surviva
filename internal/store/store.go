@@ -90,6 +90,23 @@ func (s *Store) UpdateStatus(id string, status job.Status) error {
 	return nil
 }
 
+// UpdateResumed marks a job RUNNING again under a new pid/pgid, refreshing
+// updated_at -- used when a checkpointed job is resumed in place (see
+// ActionResume) rather than re-registered under a fresh id.
+func (s *Store) UpdateResumed(id string, pid, pgid int) error {
+	res, err := s.db.Exec(
+		`UPDATE jobs SET pid = ?, pgid = ?, status = ?, updated_at = ? WHERE id = ?`,
+		pid, pgid, string(job.StatusRunning), time.Now().UTC(), id,
+	)
+	if err != nil {
+		return fmt.Errorf("update job %s: %w", id, err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("job %s not found", id)
+	}
+	return nil
+}
+
 // Get fetches a single job by id.
 func (s *Store) Get(id string) (job.Job, error) {
 	row := s.db.QueryRow(

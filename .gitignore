@@ -15,3 +15,6 @@ crash.*.log
 # Ansible sandbox
 ansible/files/
 ansible/.sandbox_facts/
+
+# graphify knowledge-graph output
+/graphify-out/

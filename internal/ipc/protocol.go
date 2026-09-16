@@ -20,6 +20,8 @@ const (
 	ActionDeregister Action = "deregister"
 	ActionList       Action = "list"
 	ActionStop       Action = "stop"
+	ActionPause      Action = "pause"
+	ActionResume     Action = "resume"
 )
 
 // RegisterJob is the payload for ActionRegister.
@@ -38,6 +40,10 @@ type Request struct {
 	Action Action       `json:"action"`
 	Job    *RegisterJob `json:"job,omitempty"`
 	JobID  string       `json:"job_id,omitempty"`
+	// Local forces ActionPause to checkpoint to local disk only, skipping
+	// S3/EBS even if the daemon is otherwise configured for durable remote
+	// storage. Ignored by every other action.
+	Local bool `json:"local,omitempty"`
 }
 
 // Response is one daemon -> client message.
@@ -46,6 +52,10 @@ type Response struct {
 	Error string    `json:"error,omitempty"`
 	JobID string    `json:"job_id,omitempty"`
 	Jobs  []job.Job `json:"jobs,omitempty"`
+	// Message carries human-readable, daemon-authoritative detail for a
+	// successful ActionPause/ActionResume (e.g. where the checkpoint landed,
+	// or the resumed pid) that the CLI prints back to the user verbatim.
+	Message string `json:"message,omitempty"`
 }
 
 // DefaultSocketPath returns the socket path clients and the daemon agree on

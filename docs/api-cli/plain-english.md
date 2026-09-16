@@ -1,7 +1,8 @@
 # The `surviva` command-line tool — plain-English guide
 
-`surviva` is a single program with six modes ("subcommands"). You always start
-with `surviva`, then tell it which of the six things you want it to do.
+`surviva` is a single program with eight modes ("subcommands"). You always
+start with `surviva`, then tell it which of the eight things you want it to
+do.
 
 | Command | What it's for |
 |---|---|
@@ -9,6 +10,8 @@ with `surviva`, then tell it which of the six things you want it to do.
 | `surviva daemon` | The background service that watches for interruption warnings and does the actual saving. |
 | `surviva list` | Show what jobs are currently being watched on this machine. |
 | `surviva stop` | Stop a job and remove it from tracking. |
+| `surviva pause` | Save a job's progress right now, on your own terms, instead of waiting for an interruption warning. |
+| `surviva resume` | Bring a saved job back to life on this same machine. |
 | `surviva restore` | Bring a saved job back to life on a new machine. |
 | `surviva version` | Print which version of surviva you're running. |
 
@@ -86,6 +89,35 @@ exist, it tells you so rather than pretending it worked. It only works on a
 job that's still genuinely running; it refuses to touch one that's in the
 middle of being saved, or already saved successfully, since removing that
 record could make a legitimate save impossible to recover later.
+
+## `surviva pause` — save a job on your own terms
+
+Everything described so far happens automatically: the daemon decides when
+to save your work, because AWS told it the machine is about to disappear.
+`surviva pause <job-id>` gives you that same button yourself, whenever you
+want it — no warning required. Maybe you want to shrink a machine down for
+the night, hand a long job off to someone else, or just make sure a save
+exists before you try something risky. It does exactly what an interruption
+would do: your job's progress is captured and the program stops right there,
+ready to be picked up again later.
+
+By default, the saved copy goes wherever this machine is already set up to
+keep saves durably (cloud storage or a special disk, same as normal). Add
+`--local` and it stays only on this machine's own disk instead — faster and
+simpler, but only recoverable from this exact machine, and gone for good if
+this machine is lost before you resume it. Everything else works the same
+way `surviva stop` does: use the job's ID from `surviva list`, and a job
+that's already being saved or already finished can't be paused a second
+time.
+
+## `surviva resume` — bring a job back, right here
+
+This is the self-service partner to `surviva pause`: it un-pauses a job on
+the very same machine that saved it, picking up exactly where it left off.
+Unlike `surviva restore` (below), it doesn't talk to AWS at all — it just
+needs the save data that's still sitting on this machine's disk, which makes
+it the natural way to bring back anything you paused with `--local`, as well
+as anything saved the normal way that hasn't been moved anywhere else yet.
 
 ## `surviva restore` — bring a job back
 

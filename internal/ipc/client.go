@@ -78,3 +78,28 @@ func (c *Client) Stop(jobID string) error {
 	_, err := c.call(Request{Action: ActionStop, JobID: jobID})
 	return err
 }
+
+// Pause asks the daemon to checkpoint a RUNNING job right now. If local is
+// true, the checkpoint is stored on local disk only for this job, even if
+// the daemon is otherwise configured for durable S3/EBS storage. It returns
+// a human-readable description of where the checkpoint ended up.
+func (c *Client) Pause(jobID string, local bool) (string, error) {
+	resp, err := c.call(Request{Action: ActionPause, JobID: jobID, Local: local})
+	if err != nil {
+		return "", err
+	}
+	return resp.Message, nil
+}
+
+// Resume asks the daemon to resume a CHECKPOINT_COMPLETE job from its local
+// checkpoint directory on this same instance. Unlike `surviva restore`, this
+// never touches S3, EBS, or DynamoDB -- it only works if the local
+// checkpoint images this daemon dumped are still on disk. It returns a
+// human-readable description of the resumed process.
+func (c *Client) Resume(jobID string) (string, error) {
+	resp, err := c.call(Request{Action: ActionResume, JobID: jobID})
+	if err != nil {
+		return "", err
+	}
+	return resp.Message, nil
+}

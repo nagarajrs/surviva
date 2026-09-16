@@ -26,12 +26,18 @@ import (
 	"surviva/internal/job"
 	"surviva/internal/procsignal"
 	"surviva/internal/remote"
+	"surviva/internal/resume"
 	"surviva/internal/store"
 )
 
 // checkpointTimeout bounds a single job's checkpoint attempt, all within
 // the Spot interruption notice's ~2-minute window.
 const checkpointTimeout = 100 * time.Second
+
+// resumeTimeout bounds a single ActionResume attempt. Unlike checkpointing,
+// resuming isn't racing an instance reclamation deadline, so it gets a more
+// generous budget.
+const resumeTimeout = 2 * time.Minute
 
 // Config configures a Daemon.
 type Config struct {
@@ -335,6 +341,65 @@ func (d *Daemon) dispatch(req ipc.Request) ipc.Response {
 		log.Printf("stopped job %s (pgid %d)", req.JobID, existing.PGID)
 		return ipc.Response{OK: true}
 
+	case ipc.ActionPause:
+		if req.JobID == "" {
+			return ipc.Response{OK: false, Error: "missing job_id"}
+		}
+		if d.interrupted.Load() {
+			// handleInterruption may already be checkpointing this exact job
+			// right now (or is about to) -- letting a manual pause run
+			// concurrently would mean two criu dumps racing the same pid.
+			return ipc.Response{OK: false, Error: "daemon has already received a Spot interruption/rebalance signal; automatic checkpointing is in progress, refusing manual pause"}
+		}
+		existing, err := d.store.Get(req.JobID)
+		if err != nil {
+			return ipc.Response{OK: false, Error: fmt.Sprintf("no such job: %s", req.JobID)}
+		}
+		if existing.Status != job.StatusRunning {
+			return ipc.Response{OK: false, Error: fmt.Sprintf("refusing to pause job %s: status is %s, not %s", req.JobID, existing.Status, job.StatusRunning)}
+		}
+		if err := d.checkpointJob(existing, req.Local); err != nil {
+			return ipc.Response{OK: false, Error: fmt.Sprintf("pause job %s: %v", req.JobID, err)}
+		}
+		msg := fmt.Sprintf("checkpoint stored locally at %s", checkpoint.Dir(d.checkpointDir, req.JobID))
+		switch {
+		case req.Local:
+			// msg already says "stored locally"
+		case d.ebsVolumeID != "":
+			msg = fmt.Sprintf("checkpoint durable on EBS volume %s", d.ebsVolumeID)
+		case d.remoteEnabled():
+			msg = "checkpoint pushed to S3"
+		}
+		log.Printf("paused job %s: %s", req.JobID, msg)
+		return ipc.Response{OK: true, JobID: req.JobID, Message: msg}
+
+	case ipc.ActionResume:
+		if req.JobID == "" {
+			return ipc.Response{OK: false, Error: "missing job_id"}
+		}
+		existing, err := d.store.Get(req.JobID)
+		if err != nil {
+			return ipc.Response{OK: false, Error: fmt.Sprintf("no such job: %s", req.JobID)}
+		}
+		if existing.Status != job.StatusCheckpointComplete {
+			return ipc.Response{OK: false, Error: fmt.Sprintf("refusing to resume job %s: status is %s, not %s", req.JobID, existing.Status, job.StatusCheckpointComplete)}
+		}
+		dir := checkpoint.Dir(d.checkpointDir, existing.ID)
+		if _, err := os.Stat(dir); err != nil {
+			return ipc.Response{OK: false, Error: fmt.Sprintf("no local checkpoint for job %s at %s -- use `surviva restore` on the target instance instead", req.JobID, dir)}
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), resumeTimeout)
+		defer cancel()
+		pid, err := resume.Run(ctx, dir, existing.HookResume, existing.ID)
+		if err != nil {
+			return ipc.Response{OK: false, Error: fmt.Sprintf("resume job %s: %v", req.JobID, err)}
+		}
+		if err := d.store.UpdateResumed(existing.ID, pid, pid); err != nil {
+			log.Printf("resume: job %s: failed to update store after resuming as pid %d: %v", req.JobID, pid, err)
+		}
+		log.Printf("resumed job %s as pid %d", req.JobID, pid)
+		return ipc.Response{OK: true, JobID: existing.ID, Message: fmt.Sprintf("resumed as pid %d", pid)}
+
 	default:
 		return ipc.Response{OK: false, Error: fmt.Sprintf("unknown action %q", req.Action)}
 	}
@@ -386,7 +451,7 @@ func (d *Daemon) handleInterruption(trigger string) {
 		go func(j job.Job) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			d.checkpointJob(j)
+			_ = d.checkpointJob(j, false) // already logged internally on failure
 		}(j)
 	}
 	wg.Wait()
@@ -394,7 +459,13 @@ func (d *Daemon) handleInterruption(trigger string) {
 	log.Printf("checkpoint: %s complete: %d job(s) processed", trigger, len(runnable))
 }
 
-func (d *Daemon) checkpointJob(j job.Job) {
+// checkpointJob checkpoints j and returns the terminal error, if any (also
+// logged internally so handleInterruption's fire-and-forget callers don't
+// need to inspect it). forceLocal skips the EBS/S3 branches below even if
+// the daemon is otherwise configured for one of them, storing the checkpoint
+// on local disk only for this one job -- used by a manual `surviva pause
+// -local`.
+func (d *Daemon) checkpointJob(j job.Job, forceLocal bool) error {
 	if err := d.store.UpdateStatus(j.ID, job.StatusCheckpointInProgress); err != nil {
 		log.Printf("checkpoint: job %s: failed to update status: %v", j.ID, err)
 	}
@@ -402,11 +473,14 @@ func (d *Daemon) checkpointJob(j job.Job) {
 	ctx, cancel := context.WithTimeout(context.Background(), checkpointTimeout)
 	defer cancel()
 
+	useEBS := !forceLocal && d.ebsVolumeID != ""
+	useRemote := !forceLocal && d.remoteEnabled()
+
 	// In EBS mode the local dump writes directly to the EBS-backed
 	// checkpoint disk, so the dump itself is the durable step that could
 	// be interrupted — write the IN_PROGRESS record before it starts, the
 	// same way the S3 path writes one before its upload starts.
-	if d.ebsVolumeID != "" {
+	if useEBS {
 		if err := d.recordEBSStart(ctx, j); err != nil {
 			log.Printf("checkpoint: job %s: %v", j.ID, err)
 		}
@@ -414,38 +488,38 @@ func (d *Daemon) checkpointJob(j job.Job) {
 
 	if err := checkpoint.Run(ctx, d.checkpointDir, j); err != nil {
 		log.Printf("checkpoint: job %s FAILED: %v", j.ID, err)
-		if d.ebsVolumeID != "" {
+		if useEBS {
 			if failErr := d.statusStore.Fail(ctx, j.ID, err.Error()); failErr != nil {
 				log.Printf("checkpoint: job %s: failed to mark remote status incomplete: %v", j.ID, failErr)
 			}
 		}
-		if err := d.store.UpdateStatus(j.ID, job.StatusFailed); err != nil {
-			log.Printf("checkpoint: job %s: failed to update status: %v", j.ID, err)
+		if serr := d.store.UpdateStatus(j.ID, job.StatusFailed); serr != nil {
+			log.Printf("checkpoint: job %s: failed to update status: %v", j.ID, serr)
 		}
-		return
+		return err
 	}
 	log.Printf("checkpoint: job %s dumped locally (%s)", j.ID, checkpoint.Dir(d.checkpointDir, j.ID))
 
 	// "Complete" means durably stored, not just dumped to local disk.
 	switch {
-	case d.ebsVolumeID != "":
+	case useEBS:
 		dir := checkpoint.Dir(d.checkpointDir, j.ID)
 		if err := d.statusStore.CompleteEBS(ctx, j.ID, d.ebsVolumeID, dir); err != nil {
 			log.Printf("checkpoint: job %s: %v", j.ID, err)
-			if err := d.store.UpdateStatus(j.ID, job.StatusFailed); err != nil {
-				log.Printf("checkpoint: job %s: failed to update status: %v", j.ID, err)
+			if serr := d.store.UpdateStatus(j.ID, job.StatusFailed); serr != nil {
+				log.Printf("checkpoint: job %s: failed to update status: %v", j.ID, serr)
 			}
-			return
+			return err
 		}
 		log.Printf("checkpoint: job %s durable on EBS volume %s", j.ID, d.ebsVolumeID)
 
-	case d.remoteEnabled(): // S3 mode
+	case useRemote: // S3 mode
 		if err := d.pushRemote(ctx, j); err != nil {
 			log.Printf("checkpoint: job %s: remote push FAILED: %v", j.ID, err)
-			if err := d.store.UpdateStatus(j.ID, job.StatusFailed); err != nil {
-				log.Printf("checkpoint: job %s: failed to update status: %v", j.ID, err)
+			if serr := d.store.UpdateStatus(j.ID, job.StatusFailed); serr != nil {
+				log.Printf("checkpoint: job %s: failed to update status: %v", j.ID, serr)
 			}
-			return
+			return err
 		}
 	}
 
@@ -453,6 +527,7 @@ func (d *Daemon) checkpointJob(j job.Job) {
 	if err := d.store.UpdateStatus(j.ID, job.StatusCheckpointComplete); err != nil {
 		log.Printf("checkpoint: job %s: failed to update status: %v", j.ID, err)
 	}
+	return nil
 }
 
 // baseRecord builds a DynamoDB record's common fields for a job about to be

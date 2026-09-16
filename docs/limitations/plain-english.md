@@ -62,6 +62,10 @@ Similar to the "output needs somewhere safe to go" issue above, but for the prog
 
 While setting up central logging (see the deployment guide), granting a machine permission to *write log entries* to an existing logging destination turned out not to be enough — AWS's remote-command tool also insists on permission to *create* that destination, even when it already exists, and refuses to send any logs there at all if that specific permission is missing. Nothing about running the actual command indicated a problem; the only clue was buried in that machine's own internal activity log. Fixed by granting the extra permission. Worth remembering generally: if logs you expect never show up somewhere, and everything otherwise looks like it worked, check the machine's own local logs for the real reason before assuming it's broken in some more complicated way.
 
+## Pausing a job "locally" only protects it against your own timing, not against losing the machine
+
+Choosing the local-only option when you manually pause a job (rather than the normal, cloud-backed save) trades away exactly the thing surviva otherwise guarantees: if the machine itself disappears before you resume that job yourself, the save is gone with it — nothing was ever sent anywhere else. That's fine, even useful, for pausing and resuming something yourself on your own schedule on the same machine, but it is not a substitute for the automatic protection this tool otherwise provides against a machine actually being taken away. If you want that stronger guarantee, don't use the local-only option.
+
 ---
 
 For the deeper technical reasoning behind some of these tradeoffs, see the project's design-record document. For how the pieces fit together, see the architecture document.
