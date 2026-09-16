@@ -48,6 +48,24 @@ find and control the thing it's checkpointing (a PID file it maintains, a
 control socket, its own signal handler) rather than surviva improvising
 process control on an arbitrary application's behalf.
 
+## A real trap found writing the example hooks: a backgrounded process can hang the whole resume call
+
+If a resume hook launches a long-running process in the background (the
+normal thing to do — the hook itself should return quickly), that
+child **must** have its own stdin/stdout/stderr redirected away from the
+hook script's (`your-app < /dev/null > app.log 2>&1 &`), not just be
+launched with a bare `&`. `internal/resume.Run` reads the hook's stdout
+through a pipe and waits for it to reach EOF; Go's own `os/exec` docs note
+that this wait doesn't complete until *every* process holding that pipe's
+write end closes it — including a grandchild that inherited it. A
+background process that doesn't redirect its own stdio silently holds that
+pipe open for its entire lifetime, so the resume call hangs until it exits
+(potentially hours), not until the hook script itself returns. Found via
+exactly this mistake in `hooks/examples/resume-example.sh`'s first draft
+(a bare `sleep 3600 &`); fixed there and called out here because it's a
+completely non-obvious trap for anyone writing a resume hook that starts a
+real long-running application.
+
 ## New: hook path validation at registration
 
 Previously, any string in `-hook-checkpoint`/`-hook-resume` was accepted

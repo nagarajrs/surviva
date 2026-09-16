@@ -23,6 +23,12 @@ you'd rather use your own application's native save/restore mechanism.
 - If you want the same "paused until resumed" semantics a real CRIU dump
   gives you for free, **your checkpoint hook has to stop your process
   itself** — nothing else will do it for you.
+- If your resume hook backgrounds a long-running process (the normal
+  thing to do), **redirect that process's own stdin/stdout/stderr away**
+  (`your-app < /dev/null > app.log 2>&1 &`) rather than a bare `&`. Skip
+  this and the resume call silently hangs until that process eventually
+  exits — see `SPEC-hooks.md` for exactly why (a real bug found writing
+  `examples/resume-example.sh`, not a hypothetical).
 
 ## Test your hook standalone, no daemon required
 

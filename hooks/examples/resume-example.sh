@@ -30,7 +30,14 @@ fi
 # toy example doesn't have a real application to restore, so it just starts
 # a harmless placeholder process to stand in for "the resumed job" and
 # reports its PID -- replace this with actually launching your app.
-sleep 3600 &
+#
+# IMPORTANT: redirect the backgrounded process's own stdin/stdout/stderr
+# away from this script's (< /dev/null > ... 2>&1), not just launch it with
+# a bare `&`. surviva reads this hook's stdout via a pipe and waits for it
+# to reach EOF; if a long-running grandchild inherits that same pipe fd and
+# never closes it, surviva's resume call hangs until that process exits --
+# which could be hours, not the sub-second delay you'd expect.
+sleep 3600 < /dev/null > /dev/null 2>&1 &
 resumed_pid=$!
 
 # Nothing but the bare PID goes to stdout -- put any diagnostics on stderr
