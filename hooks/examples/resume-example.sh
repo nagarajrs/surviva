@@ -1,6 +1,6 @@
 #!/bin/sh
 # Example resume hook -- see ../README.md for the contract this must
-# satisfy, and SPEC-hooks.md at the repo root for the full spec.
+# satisfy, and ../../docs/specs/hooks.md for the full spec.
 #
 # Invocation (surviva controls this, always exactly two arguments):
 #   resume-example.sh <job-id> <checkpoint-dir>

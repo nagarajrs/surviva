@@ -78,7 +78,7 @@ func newTestDaemon(t *testing.T) *Daemon {
 		CheckpointBaseDir:        t.TempDir(),
 		MaxConcurrentCheckpoints: 2,
 	})
-	// Swap the real CRIU-backed functions for fakes -- see SPEC-daemon.md's
+	// Swap the real CRIU-backed functions for fakes -- see docs/specs/daemon.md's
 	// testing strategy: daemon's orchestration is unit-tested, CRIU itself
 	// needs a real Linux box.
 	d.checkpointFunc = func(ctx context.Context, dir string, j store.Job) error { return nil }

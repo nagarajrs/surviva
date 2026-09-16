@@ -1,7 +1,7 @@
 // Package auditlog appends one JSON line per audit-worthy event (a CLI
 // command invocation, a daemon-side activity) to a shared file. Multiple OS
 // processes -- the long-running daemon and a fresh surviva-cli process per
-// invocation -- write to the same file concurrently; see SPEC-audit-log.md
+// invocation -- write to the same file concurrently; see docs/specs/audit-log.md
 // for why that's safe here and how the file is expected to be rotated
 // (logrotate + copytruncate, not this package).
 package auditlog

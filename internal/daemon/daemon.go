@@ -1,6 +1,6 @@
 // Package daemon is the long-running surviva process: the sole writer to
 // store, the thing that shells out to CRIU, and the thing that watches for
-// a cloud interruption signal and reacts to it. See SPEC-daemon.md.
+// a cloud interruption signal and reacts to it. See docs/specs/daemon.md.
 package daemon
 
 import (
@@ -227,7 +227,7 @@ func (d *Daemon) handleRegister(req ipc.Request) ipc.Response {
 // validateHookPath rejects a non-empty hook path that isn't a regular,
 // executable file, so a typo'd or non-executable hook is caught at
 // registration time rather than discovered only when the job actually
-// needs checkpointing (see SPEC-hooks.md). An empty path (meaning "use
+// needs checkpointing (see docs/specs/hooks.md). An empty path (meaning "use
 // CRIU" for that operation) is never checked here.
 func validateHookPath(flagName, path string) error {
 	if path == "" {
@@ -342,9 +342,9 @@ func (d *Daemon) handleComplete(req ipc.Request) ipc.Response {
 		return ipc.Response{OK: false, Error: fmt.Sprintf("no such job: %s", req.JobID)}
 	}
 	if j.Status != store.StatusRunning {
-		// Race with the checkpoint subsystem (legacy ADR-3): the job already
-		// moved past RUNNING by the time this completion report arrived.
-		// Not an error -- the checkpoint/cancel path already owns it.
+		// Race with the checkpoint subsystem: the job already moved past
+		// RUNNING by the time this completion report arrived. Not an error
+		// -- the checkpoint/cancel path already owns it.
 		return ipc.Response{OK: true, JobID: req.JobID, Message: "job already past RUNNING, ignoring stale completion report"}
 	}
 	if req.ExitCode == 0 {
@@ -399,7 +399,7 @@ func (d *Daemon) handlePrune(req ipc.Request) ipc.Response {
 // requested by a CLI user.
 const daemonActor = "daemon"
 
-// checkpointJob runs the Checkpoint operation from SPEC-daemon.md, shared by
+// checkpointJob runs the Checkpoint operation from docs/specs/daemon.md, shared by
 // a manual Pause and the interruption fan-out below. requestedBy is the OS
 // user for a manual pause, or daemonActor for an automatic one.
 func (d *Daemon) checkpointJob(ctx context.Context, j store.Job, requestedBy string) error {
@@ -423,7 +423,7 @@ func (d *Daemon) checkpointJob(ctx context.Context, j store.Job, requestedBy str
 	return nil
 }
 
-// resumeJob runs the Resume operation from SPEC-daemon.md.
+// resumeJob runs the Resume operation from docs/specs/daemon.md.
 func (d *Daemon) resumeJob(ctx context.Context, j store.Job, requestedBy string) error {
 	if err := d.store.UpdateStatus(j.ID, store.StatusRestorePending, "", requestedBy); err != nil {
 		log.Printf("resume: job %s: failed to update status: %v", j.ID, err)

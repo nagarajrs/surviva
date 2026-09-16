@@ -1,10 +1,11 @@
 # Writing a custom checkpoint/resume hook
 
-See `../SPEC-hooks.md` for the full spec. Short version: a hook is any two
-executable scripts (or one script handling both, called with different
-purposes) that fully replace CRIU for one job — for anything CRIU can't
-checkpoint (GPU state, certain sockets — see `../LIMITATIONS.md`), or when
-you'd rather use your own application's native save/restore mechanism.
+See [`../docs/specs/hooks.md`](../docs/specs/hooks.md) for the full spec.
+Short version: a hook is any two executable scripts (or one script handling
+both, called with different purposes) that fully replace CRIU for one job
+— for anything CRIU can't checkpoint (GPU state, certain sockets — see
+[`../docs/LIMITATIONS.md`](../docs/LIMITATIONS.md)), or when you'd rather
+use your own application's native save/restore mechanism.
 
 ## The contract
 
@@ -18,7 +19,8 @@ you'd rather use your own application's native save/restore mechanism.
   call for that job — read/write whatever files you need there.
 - You are not given the tracked process's PID. Your application is assumed
   to already have its own way to find/control itself (a PID file it
-  maintains, a control socket, etc.) — see `SPEC-hooks.md`'s "responsibility
+  maintains, a control socket, etc.) — see
+  [`../docs/specs/hooks.md`](../docs/specs/hooks.md)'s "responsibility
   split" section for why.
 - If you want the same "paused until resumed" semantics a real CRIU dump
   gives you for free, **your checkpoint hook has to stop your process
@@ -27,8 +29,9 @@ you'd rather use your own application's native save/restore mechanism.
   thing to do), **redirect that process's own stdin/stdout/stderr away**
   (`your-app < /dev/null > app.log 2>&1 &`) rather than a bare `&`. Skip
   this and the resume call silently hangs until that process eventually
-  exits — see `SPEC-hooks.md` for exactly why (a real bug found writing
-  `examples/resume-example.sh`, not a hypothetical).
+  exits — see [`../docs/specs/hooks.md`](../docs/specs/hooks.md) for
+  exactly why (a real bug found writing `examples/resume-example.sh`, not
+  a hypothetical).
 
 ## Test your hook standalone, no daemon required
 

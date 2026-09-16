@@ -14,7 +14,7 @@ import (
 
 // joinCmd implements `surviva join [flags] <pid>`: adopt an already-running
 // external process into tracking. Refuses unless pid is already its own
-// process-group leader -- see SPEC-surviva-cli.md for why (cancel signals
+// process-group leader -- see docs/specs/surviva-cli.md for why (cancel signals
 // the whole group, which is only safe for a group isolating just this job).
 func joinCmd(args []string) int {
 	fs := flag.NewFlagSet("join", flag.ExitOnError)

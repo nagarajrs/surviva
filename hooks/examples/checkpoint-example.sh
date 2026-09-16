@@ -1,6 +1,6 @@
 #!/bin/sh
 # Example checkpoint hook -- see ../README.md for the contract this must
-# satisfy, and SPEC-hooks.md at the repo root for the full spec.
+# satisfy, and ../../docs/specs/hooks.md for the full spec.
 #
 # Invocation (surviva controls this, always exactly two arguments):
 #   checkpoint-example.sh <job-id> <checkpoint-dir>
@@ -34,7 +34,7 @@ mkdir -p "$checkpoint_dir"
 #
 # Unlike a real CRIU dump (which always stops the process it checkpoints as
 # a side effect), a hook gets no such thing for free -- surviva never even
-# tells this script the tracked process's PID (see SPEC-hooks.md for why).
+# tells this script the tracked process's PID (see ../../docs/specs/hooks.md for why).
 # If you want the same "paused until resumed" semantics, your application
 # needs its own way to find and stop itself -- e.g. reading a PID file it
 # maintains on its own:

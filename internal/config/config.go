@@ -1,5 +1,5 @@
 // Package config loads surviva.conf: a flat, slurm.conf-style key=value
-// file, not YAML/JSON. See SPEC-config.md for the format and directive list.
+// file, not YAML/JSON. See docs/specs/config.md for the format and directive list.
 package config
 
 import (
@@ -20,11 +20,11 @@ type Config struct {
 	CheckpointBaseDir string
 	// MaxConcurrentCheckpoints bounds how many jobs are checkpointed at once
 	// during an interruption fan-out. Optional; 0 means "let daemon default
-	// it" (runtime.NumCPU() -- see SPEC-daemon.md).
+	// it" (runtime.NumCPU() -- see docs/specs/daemon.md).
 	MaxConcurrentCheckpoints int
 
 	// DBType selects the job-table backend: "sqlite" (default) or "mysql".
-	// See SPEC-store.md for what each field below is used for.
+	// See docs/specs/store.md for what each field below is used for.
 	DBType     string
 	DBPath     string // sqlite
 	DBHost     string // mysql
@@ -36,7 +36,7 @@ type Config struct {
 	// NotifyTargetType selects an optional AWS notification target invoked
 	// the moment daemon detects a Spot interruption/rebalance signal:
 	// "lambda" or "stepfunction". Empty (the default) disables it entirely.
-	// See SPEC-daemon.md for the payload schema.
+	// See docs/specs/daemon.md for the payload schema.
 	NotifyTargetType string
 	NotifyTargetARN  string
 }

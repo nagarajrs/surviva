@@ -17,8 +17,6 @@ jobs:
           go-version-file: go.mod
 
       - name: gofmt
-        # Scoped to the redesigned tree -- legacy/ predates gofmt enforcement
-        # and is kept as-is (see legacy/README.md), not reformatted here.
         run: |
           UNFORMATTED="$(gofmt -l ./cmd ./internal)"
           if [ -n "$UNFORMATTED" ]; then

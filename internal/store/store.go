@@ -1,6 +1,6 @@
 // Package store persists tracked jobs in a local SQLite database. daemon is
 // its only writer; surviva-cli never opens the database directly, it only
-// ever sees job data daemon hands back. See SPEC-store.md for the full
+// ever sees job data daemon hands back. See docs/specs/store.md for the full
 // design and status-transition table.
 package store
 
@@ -43,7 +43,7 @@ var terminalStatuses = map[Status]bool{
 }
 
 // validTransitions enumerates every allowed from->to status change, per
-// SPEC-store.md's transition table.
+// docs/specs/store.md's transition table.
 var validTransitions = map[Status][]Status{
 	StatusRunning: {
 		StatusCheckpointInProgress,
@@ -187,7 +187,7 @@ type Store struct {
 
 // Options selects and configures the job-table backend. The zero value
 // (empty Driver) means "sqlite" -- Path is then required; the mysql fields
-// are required instead when Driver is "mysql". See SPEC-store.md.
+// are required instead when Driver is "mysql". See docs/specs/store.md.
 type Options struct {
 	Driver string // "sqlite" (default if empty) or "mysql"
 

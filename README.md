@@ -34,21 +34,21 @@ export SURVIVA_CONF=./surviva.conf SURVIVA_SOCKET=./surviva.sock
 ./surviva resume <job-id>
 ```
 
-(CRIU checkpoint/resume needs Linux + root — see `DEPLOYMENT.md` for
-installing CRIU itself and running this as a real systemd service.)
+(CRIU checkpoint/resume needs Linux + root — see
+[`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) for installing CRIU itself and
+running this as a real systemd service, or run
+[`deploy/install.sh`](deploy/install.sh) to automate it end to end.)
 
 ## Learn more
 
-- [`CAPABILITY_MAP.md`](CAPABILITY_MAP.md) — the module index: what each
-  piece (`store`, `config`, `audit-log`, `daemon`, `surviva-cli`) does and
-  its full design spec.
-- [`DEPLOYMENT.md`](DEPLOYMENT.md) — building CRIU, installing the
-  systemd unit, IAM for the optional Lambda/Step Functions notify.
-- [`LIMITATIONS.md`](LIMITATIONS.md) — real gotchas found building and
-  testing this (e.g. why a process attached to an interactive terminal
-  can't be checkpointed at all).
+- [`docs/CAPABILITY_MAP.md`](docs/CAPABILITY_MAP.md) — the module index:
+  what each piece (`store`, `config`, `audit-log`, `daemon`, `surviva-cli`)
+  does and its full design spec.
+- [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) — building CRIU, installing
+  the systemd unit, IAM for the optional Lambda/Step Functions notify.
+- [`docs/LIMITATIONS.md`](docs/LIMITATIONS.md) — real gotchas found
+  building and testing this (e.g. why a process attached to an interactive
+  terminal can't be checkpointed at all).
 - [`hooks/README.md`](hooks/README.md) — writing a custom checkpoint/resume
   hook for anything CRIU can't handle (GPU state, application-specific
   save/restore).
-- [`legacy/README.md`](legacy/README.md) — the original single-daemon
-  implementation this redesign replaced, and why.

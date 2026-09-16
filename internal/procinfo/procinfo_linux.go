@@ -3,7 +3,7 @@
 // Package procinfo does best-effort process introspection for `surviva
 // join`, which (unlike `run`) doesn't already know a process's command line
 // or working directory. Never required to succeed -- store.Job accepts
-// empty Command/WorkDir (see SPEC-store.md), so a read failure here just
+// empty Command/WorkDir (see docs/specs/store.md), so a read failure here just
 // means a less informative `show`, not a failed join.
 package procinfo
 

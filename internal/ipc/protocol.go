@@ -1,6 +1,6 @@
 // Package ipc defines the newline-delimited JSON protocol spoken between
 // surviva-cli (client) and surviva daemon (server) over a local Unix domain
-// socket. See SPEC-daemon.md for the full action list and semantics.
+// socket. See docs/specs/daemon.md for the full action list and semantics.
 package ipc
 
 import (

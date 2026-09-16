@@ -2,7 +2,7 @@
 // function or Step Functions state machine, invoked when daemon detects a
 // Spot interruption/rebalance signal. surviva does none of the downstream
 // logic here -- it hands off a JSON payload and lets the user's own
-// Lambda/Step Function do whatever they want with it. See SPEC-daemon.md.
+// Lambda/Step Function do whatever they want with it. See docs/specs/daemon.md.
 package aws
 
 import (
@@ -24,7 +24,7 @@ type LambdaNotifier struct {
 
 // NewLambdaNotifier returns a LambdaNotifier targeting functionARN, using
 // cfg for AWS credentials (the instance's own IAM role via the normal SDK
-// credential chain, same as legacy's S3/DynamoDB integration relied on).
+// credential chain).
 func NewLambdaNotifier(cfg aws.Config, functionARN string) *LambdaNotifier {
 	return &LambdaNotifier{client: lambda.NewFromConfig(cfg), arn: functionARN}
 }
