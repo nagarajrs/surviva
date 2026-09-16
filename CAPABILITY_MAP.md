@@ -23,3 +23,7 @@ orchestrated restore (Step Functions/SSM).
 Each module spec is reviewed and approved before that module's own Plan
 phase starts, per `spec-driven-development`. This file is the index — update
 the table (spec link, new modules) as each one lands, don't let it drift.
+
+See [LIMITATIONS.md](LIMITATIONS.md) for real gotchas found testing this
+redesign (currently: a tracked process attached to an interactive terminal
+can't be checkpointed at all — a CRIU constraint, not a bug).
