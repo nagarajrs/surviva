@@ -18,7 +18,11 @@ modules, replacing the single AWS-coupled daemon in `legacy/` (see
 **Explicitly deferred** (not modules, added later as `surviva.conf`-driven
 extensions once the above are solid): durable remote checkpoint storage
 (S3/EBS), cross-instance status tracking (DynamoDB), cross-instance
-orchestrated restore (Step Functions/SSM).
+orchestrated restore (Step Functions/SSM) *owned by surviva itself* — the
+`NotifyTargetType`/`NotifyTargetARN` notify hook (see `SPEC-daemon.md`) is
+related but distinct: surviva hands off a JSON payload on interruption, the
+*user's own* Lambda/Step Function does any orchestration, surviva still
+owns none of it.
 
 Each module spec is reviewed and approved before that module's own Plan
 phase starts, per `spec-driven-development`. This file is the index — update
@@ -35,3 +39,7 @@ spanning several of the above):
 See [LIMITATIONS.md](LIMITATIONS.md) for real gotchas found testing this
 redesign (currently: a tracked process attached to an interactive terminal
 can't be checkpointed at all — a CRIU constraint, not a bug).
+
+See [README.md](README.md) for a quick start and [DEPLOYMENT.md](DEPLOYMENT.md)
+for building CRIU, installing the systemd unit, and IAM for the optional
+notify target.

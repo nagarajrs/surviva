@@ -1,0 +1,12 @@
+[Unit]
+Description=surviva daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/surviva daemon -conf /etc/surviva/surviva.conf
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
