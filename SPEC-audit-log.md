@@ -40,10 +40,44 @@ One JSON object per line (JSONL), appended to the file at
 - `detail`: free text — an error message, a one-line args summary, whatever
   the caller finds useful. Empty string if nothing to add.
 
-No rotation, no compression, no remote sink (syslog/CloudWatch/etc.) — the
-file just grows. Out of scope for the same reason S3/DynamoDB are: keep
-everything local until the basics are solid, then revisit. Operators can
-point standard log-rotation tooling at the file later if it matters.
+No rotation, no compression, no remote sink (syslog/CloudWatch/etc.) built
+into this package — see Rotation below for why that's a deliberate choice,
+not just deferral.
+
+## Rotation (sustainability)
+
+The file is expected to grow forever unless something external rotates it.
+That something is **OS-level `logrotate`, not code in this package**, and
+specifically its `copytruncate` mode:
+
+```
+/var/log/surviva/audit.log {
+    daily
+    rotate 14
+    copytruncate
+    missingok
+    notifempty
+}
+```
+
+Why not rotate in-app (rename-and-start-fresh on a size/time trigger): this
+file has multiple independent OS-process writers at once — the long-running
+`daemon` and a brand-new `surviva-cli` process on every single invocation.
+Any rename-based rotation scheme requires every writer to notice the
+rotation and reopen the file; that's manageable for one long-lived daemon
+but not for arbitrary short-lived CLI processes without adding real
+machinery (a lock file, a signal, an identity check before every write) —
+exactly the complexity this module exists to avoid. `copytruncate` sidesteps
+the problem entirely: it copies the file out, then truncates the *original*
+in place, so every already-open file descriptor — including one a CLI
+process opened a second ago — keeps appending to the same inode with zero
+interruption or lost lines, no reopen or signal required anywhere. Sizing
+and scheduling ("100MB or daily, whichever first") is then just a
+`logrotate` config, not something `audit-log` needs to know about.
+
+This means: nothing in `Open`/`Log` changes to support rotation, and a
+sample `logrotate` stanza (as above) belongs in deployment docs once those
+exist for the new design, not in this package.
 
 ## API
 
@@ -91,8 +125,9 @@ this module's.
 
 - **Always:** append-only — never rewrite, truncate, or reorder existing
   lines.
-- **Ask first:** adding rotation/compression, a remote sink, or a query/read
-  API.
+- **Ask first:** adding a remote sink or a query/read API. (Rotation is
+  already decided — see above — not something to revisit without a concrete
+  reason `logrotate`/`copytruncate` stops being sufficient.)
 - **Never:** block a caller for long (this is a single buffered append, not
   a network call); never make an audit-write failure implicitly fatal
   inside this package — that's the caller's decision.
