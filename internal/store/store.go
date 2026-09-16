@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-sql-driver/mysql"
@@ -244,7 +245,70 @@ func Open(opts Options) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("apply schema: %w", err)
 	}
+	// CREATE TABLE IF NOT EXISTS is a no-op against an already-existing jobs
+	// table from before `owner` existed -- an in-place upgrade otherwise
+	// fails on the very first Insert ("no such column: owner"). job_history
+	// needs no such backfill: it's an entirely new table, so IF NOT EXISTS
+	// already creates it correctly on an upgrade.
+	if err := addColumnIfMissing(db, driver, "jobs", "owner", "TEXT NOT NULL DEFAULT ''", "VARCHAR(255) NOT NULL DEFAULT ''"); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate schema: %w", err)
+	}
 	return &Store{db: db}, nil
+}
+
+// addColumnIfMissing runs an ALTER TABLE ADD COLUMN if column isn't already
+// present on table -- the minimal migration this package needs today (one
+// column added to a pre-existing table). sqliteType/mysqlType are the full
+// column definition (type + constraints) for each dialect.
+func addColumnIfMissing(db *sql.DB, driver, table, column, sqliteType, mysqlType string) error {
+	has, err := hasColumn(db, driver, table, column)
+	if err != nil {
+		return fmt.Errorf("check column %s.%s: %w", table, column, err)
+	}
+	if has {
+		return nil
+	}
+	colType := sqliteType
+	if driver == "mysql" {
+		colType = mysqlType
+	}
+	if _, err := db.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", table, column, colType)); err != nil {
+		return fmt.Errorf("add column %s.%s: %w", table, column, err)
+	}
+	return nil
+}
+
+func hasColumn(db *sql.DB, driver, table, column string) (bool, error) {
+	switch driver {
+	case "sqlite":
+		rows, err := db.Query(fmt.Sprintf("PRAGMA table_info(%s)", table))
+		if err != nil {
+			return false, err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var cid, notnull, pk int
+			var name, ctype string
+			var dflt any
+			if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+				return false, err
+			}
+			if strings.EqualFold(name, column) {
+				return true, nil
+			}
+		}
+		return false, rows.Err()
+	case "mysql":
+		var n int
+		err := db.QueryRow(
+			`SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ?`,
+			table, column,
+		).Scan(&n)
+		return n > 0, err
+	default:
+		return false, fmt.Errorf("unsupported driver %q", driver)
+	}
 }
 
 // Close closes the underlying database.

@@ -203,6 +203,20 @@ and would otherwise need its own update path.
 `from_status`, `to_status`, `changed_by`, `changed_at`. Append-only — nothing
 in this package ever updates or deletes a row here.
 
+**In-place upgrade from before this existed:** `job_history` is a brand new
+table, so `CREATE TABLE IF NOT EXISTS` creates it correctly on an upgrade.
+`jobs.owner` is not — it's a column added to a table that already existed,
+and `CREATE TABLE IF NOT EXISTS` is a no-op against an existing table, so it
+never adds a missing column. `Open` runs one small migration after applying
+the schema: `ALTER TABLE jobs ADD COLUMN owner ...` (per-dialect type), but
+only if the column isn't already there (checked via `PRAGMA table_info`
+for sqlite, `information_schema.columns` for mysql) — so a fresh database
+and a fresh column both leave `Open` idempotent. This is deliberately the
+minimal fix for the one column that needs it, not a general migrations
+framework (versioned migration files, a schema-version table) — add one if
+a second such column ever needs backfilling and this stops being a
+one-off.
+
 `Get`/`UpdateStatus`/`UpdatePID`/`UpdateCheckpointDir` all parse `id` into an
 integer before querying (a job id that isn't a plain number is rejected with
 a clear error, not a cryptic SQL failure) — the jobs table's `id` column is
@@ -246,6 +260,10 @@ temp-file DB (matches legacy's approach — no new test infra needed):
   call, in order, with the right `from`/`to`/`changed_by`; `History()`
   returns them oldest-first. `IsTerminal` agrees with the terminal-status set
   `List()`/`ListTerminal()` already use.
+- `Open` against a jobs table seeded with the pre-`owner`-column schema
+  (simulating an in-place upgrade) adds the column and lets `Insert` succeed
+  — reproduced as a real failure against SQLite before the migration step
+  existed, and separately verified by hand against real MySQL.
 
 No real MySQL server is available for `go test` in this environment (the
 project already accepts this constraint for CRIU/AWS — real-infra testing

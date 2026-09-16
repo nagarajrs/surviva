@@ -1,6 +1,7 @@
 package store
 
 import (
+	"database/sql"
 	"path/filepath"
 	"testing"
 	"time"
@@ -17,6 +18,52 @@ func TestOpenCreatesMissingParentDir(t *testing.T) {
 		t.Fatalf("Open with missing parent dirs: %v", err)
 	}
 	s.Close()
+}
+
+func TestOpenMigratesPreOwnerColumnDatabase(t *testing.T) {
+	// Regression: an in-place upgrade from before Owner/job_history existed
+	// left behind a jobs table with no owner column. CREATE TABLE IF NOT
+	// EXISTS is a no-op against it, so without a real migration step Insert
+	// used to fail outright with "no such column: owner" on first use after
+	// upgrading -- reproduced against real SQLite before this test existed.
+	path := filepath.Join(t.TempDir(), "jobs.db")
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	if _, err := raw.Exec(`
+		CREATE TABLE jobs (
+			id              INTEGER PRIMARY KEY AUTOINCREMENT,
+			pid             INTEGER NOT NULL,
+			pgid            INTEGER NOT NULL,
+			checkpoint_dir  TEXT NOT NULL,
+			command         TEXT NOT NULL,
+			work_dir        TEXT NOT NULL,
+			hook_checkpoint TEXT NOT NULL DEFAULT '',
+			hook_resume     TEXT NOT NULL DEFAULT '',
+			status          TEXT NOT NULL,
+			failure_reason  TEXT NOT NULL DEFAULT '',
+			registered_at   DATETIME NOT NULL,
+			updated_at      DATETIME NOT NULL
+		)`); err != nil {
+		t.Fatalf("seed pre-upgrade schema: %v", err)
+	}
+	raw.Close()
+
+	s, err := Open(Options{Path: path})
+	if err != nil {
+		t.Fatalf("Open against a pre-owner-column database: %v", err)
+	}
+	defer s.Close()
+
+	id := insertJob(t, s, newJob())
+	got, err := s.Get(id)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Owner != "alice" {
+		t.Errorf("Owner = %q, want %q", got.Owner, "alice")
+	}
 }
 
 func TestOpenRejectsUnsupportedDriver(t *testing.T) {
