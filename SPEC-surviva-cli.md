@@ -148,13 +148,9 @@ CRIU, same as `daemon`'s own testing strategy.
 
 ## Open Questions
 
-1. **`join`'s process-group-leader requirement.** As specced, `join` refuses
-   to adopt a process that isn't already its own process-group leader, to
-   keep `cancel`'s group-kill safe. This is a real, meaningful limitation —
-   many ordinary running processes (a plain shell job, most things not
-   started with `setsid`) won't qualify. Confirm this is the right
-   tradeoff, versus e.g. tracking "this job should only ever be signaled by
-   exact pid, never by group" as a per-job flag (a `store` schema change,
-   more invasive).
-2. **No priority/ordering flag**, dropped from `legacy`'s `run -priority`.
-   Confirm this is fine to leave out until it's actually needed.
+None remaining.
+
+1. ~~`join`'s process-group-leader requirement.~~ **Confirmed:** `join`
+   refuses to adopt a process that isn't already its own process-group
+   leader, exactly as specced above.
+2. ~~No priority/ordering flag.~~ **Confirmed: left out** for this phase.
