@@ -31,7 +31,7 @@ func pauseCmd(args []string) int {
 	}
 
 	client := ipc.NewClient(*socketPath)
-	msg, err := client.Pause(jobID)
+	msg, err := client.Pause(jobID, currentOSUser())
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "surviva pause: %v\n", err)
 		logCLI(al, "pause", jobID, "error", err.Error())

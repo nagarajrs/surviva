@@ -32,7 +32,7 @@ func resumeCmd(args []string) int {
 	}
 
 	client := ipc.NewClient(*socketPath)
-	msg, err := client.Resume(jobID)
+	msg, err := client.Resume(jobID, currentOSUser())
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "surviva resume: %v\n", err)
 		logCLI(al, "resume", jobID, "error", err.Error())

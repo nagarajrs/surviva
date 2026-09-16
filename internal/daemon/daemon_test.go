@@ -88,7 +88,7 @@ func newTestDaemon(t *testing.T) *Daemon {
 
 func registerJob(t *testing.T, d *Daemon) string {
 	t.Helper()
-	resp := d.dispatch(ipc.Request{Action: ipc.ActionRegister, Job: &ipc.RegisterJob{
+	resp := d.dispatch(ipc.Request{Action: ipc.ActionRegister, RequestedBy: "alice", Job: &ipc.RegisterJob{
 		PID: 987654321, PGID: 987654321, Command: []string{"sleep", "300"}, WorkDir: "/tmp",
 	}})
 	if !resp.OK {
@@ -119,8 +119,31 @@ func TestRegisterListShow(t *testing.T) {
 	if !showResp.OK {
 		t.Fatalf("show: %s", showResp.Error)
 	}
-	if showResp.Job == nil || showResp.Job.ID != id || showResp.Job.Status != store.StatusRunning {
+	if showResp.Job == nil || showResp.Job.ID != id || showResp.Job.Status != store.StatusRunning || showResp.Job.Owner != "alice" {
 		t.Errorf("show returned unexpected job: %+v", showResp.Job)
+	}
+	if showResp.History != nil {
+		t.Errorf("show without IncludeHistory returned history: %+v", showResp.History)
+	}
+}
+
+func TestShowIncludesHistoryWhenRequested(t *testing.T) {
+	d := newTestDaemon(t)
+	id := registerJob(t, d)
+	if resp := d.dispatch(ipc.Request{Action: ipc.ActionPause, JobID: id, RequestedBy: "bob"}); !resp.OK {
+		t.Fatalf("pause: %s", resp.Error)
+	}
+
+	resp := d.dispatch(ipc.Request{Action: ipc.ActionShow, JobID: id, IncludeHistory: true})
+	if !resp.OK {
+		t.Fatalf("show: %s", resp.Error)
+	}
+	if len(resp.History) != 2 {
+		t.Fatalf("got %d history entries, want 2: %+v", len(resp.History), resp.History)
+	}
+	last := resp.History[len(resp.History)-1]
+	if last.ToStatus != store.StatusCheckpointCreated || last.ChangedBy != "bob" {
+		t.Errorf("last entry = %+v, want ToStatus=%s ChangedBy=bob", last, store.StatusCheckpointCreated)
 	}
 }
 
@@ -263,7 +286,7 @@ func TestCancelCheckpointCreatedJob(t *testing.T) {
 func TestCancelRejectedMidCheckpoint(t *testing.T) {
 	d := newTestDaemon(t)
 	id := registerJob(t, d)
-	if err := d.store.UpdateStatus(id, store.StatusCheckpointInProgress, ""); err != nil {
+	if err := d.store.UpdateStatus(id, store.StatusCheckpointInProgress, "", "tester"); err != nil {
 		t.Fatalf("seed status: %v", err)
 	}
 

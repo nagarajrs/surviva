@@ -51,8 +51,19 @@ type Job struct {
     HookResume     string
     Status         Status
     FailureReason  string // set on FAILED/CHECKPOINT_CREATION_FAILED/RESTORE_FAILED, empty otherwise
+    Owner          string // OS user who ran `surviva run`/`join`, captured at registration
     RegisteredAt   time.Time
     UpdatedAt      time.Time
+}
+
+// HistoryEntry is one append-only record of a status transition. Backs
+// `surviva show -history`.
+type HistoryEntry struct {
+    JobID      string
+    FromStatus Status
+    ToStatus   Status
+    ChangedBy  string    // OS user for a CLI-driven change, "daemon" for an automatic one
+    ChangedAt  time.Time
 }
 ```
 
@@ -163,10 +174,34 @@ func (s *Store) Insert(j Job) (string, error)                         // ignores
 func (s *Store) Get(id string) (Job, error)                          // any status — backs `show`
 func (s *Store) List() ([]Job, error)                                 // active only — backs `list`
 func (s *Store) ListTerminal() ([]Job, error)                         // FAILED/CANCELED/COMPLETED only — backs `prune`
-func (s *Store) UpdateStatus(id string, to Status, failureReason string) error
-func (s *Store) UpdatePID(id string, pid, pgid int) error             // resume reusing the same job ID
+func (s *Store) UpdateStatus(id string, to Status, failureReason, changedBy string) error
+func (s *Store) UpdatePID(id string, pid, pgid int, changedBy string) error // resume reusing the same job ID
 func (s *Store) UpdateCheckpointDir(id, dir string) error             // fills in the default path once id is known
+func (s *Store) History(id string) ([]HistoryEntry, error)            // every transition, oldest first — backs `show -history`
+
+func IsTerminal(s Status) bool // exported so callers (surviva-cli) can decide how to compute a running duration
 ```
+
+**Job audit trail** (who started a job, who/what changed its status, and
+when): three questions the redesign wasn't originally answering that came up
+in review — "are we capturing who ran/changed a job, and for how long has it
+been running?" `Owner` answers "who initiated" (captured once, at `Insert`).
+`changedBy` on `UpdateStatus`/`UpdatePID` answers "who/what changed it" — the
+OS user for a CLI-driven pause/resume/cancel/complete, or the literal string
+`"daemon"` for a status change the daemon makes on its own (the interruption
+fan-out). Both `UpdateStatus` and `UpdatePID` write their `job_history` row
+in the same SQL transaction as the status update itself, so every transition
+is recorded automatically — no call site can forget to log one, since the
+history write isn't a separate step callers have to remember. "How long has
+it been running" is deliberately **not** a stored column: `surviva-cli`
+computes it at display time (`time.Since(RegisteredAt)` while active,
+`UpdatedAt.Sub(RegisteredAt)` once terminal — `IsTerminal` tells it which),
+same reasoning as legacy-avoidance of storing a value that's cheap to derive
+and would otherwise need its own update path.
+
+`job_history` (both schemas): `id` (auto-increment PK), `job_id`,
+`from_status`, `to_status`, `changed_by`, `changed_at`. Append-only — nothing
+in this package ever updates or deletes a row here.
 
 `Get`/`UpdateStatus`/`UpdatePID`/`UpdateCheckpointDir` all parse `id` into an
 integer before querying (a job id that isn't a plain number is rejected with
@@ -207,6 +242,10 @@ temp-file DB (matches legacy's approach — no new test infra needed):
 - `Open` with an unrecognized `Options.Driver` fails immediately, before
   attempting any connection; `Options{}` (empty `Driver`) behaves exactly
   like an explicit `"sqlite"`.
+- `UpdateStatus`/`UpdatePID` each append exactly one `job_history` row per
+  call, in order, with the right `from`/`to`/`changed_by`; `History()`
+  returns them oldest-first. `IsTerminal` agrees with the terminal-status set
+  `List()`/`ListTerminal()` already use.
 
 No real MySQL server is available for `go test` in this environment (the
 project already accepts this constraint for CRIU/AWS — real-infra testing

@@ -205,6 +205,7 @@ func (d *Daemon) handleRegister(req ipc.Request) ipc.Response {
 		HookCheckpoint: req.Job.HookCheckpoint,
 		HookResume:     req.Job.HookResume,
 		Status:         store.StatusRunning,
+		Owner:          req.RequestedBy,
 		RegisteredAt:   now,
 		UpdatedAt:      now,
 	}
@@ -261,7 +262,15 @@ func (d *Daemon) handleShow(req ipc.Request) ipc.Response {
 	if err != nil {
 		return ipc.Response{OK: false, Error: fmt.Sprintf("no such job: %s", req.JobID)}
 	}
-	return ipc.Response{OK: true, Job: &j}
+	resp := ipc.Response{OK: true, Job: &j}
+	if req.IncludeHistory {
+		history, err := d.store.History(req.JobID)
+		if err != nil {
+			return ipc.Response{OK: false, Error: err.Error()}
+		}
+		resp.History = history
+	}
+	return resp
 }
 
 func (d *Daemon) handlePause(req ipc.Request) ipc.Response {
@@ -278,7 +287,7 @@ func (d *Daemon) handlePause(req ipc.Request) ipc.Response {
 	if j.Status != store.StatusRunning {
 		return ipc.Response{OK: false, Error: fmt.Sprintf("refusing to pause job %s: status is %s, not %s", req.JobID, j.Status, store.StatusRunning)}
 	}
-	if err := d.checkpointJob(context.Background(), j); err != nil {
+	if err := d.checkpointJob(context.Background(), j, req.RequestedBy); err != nil {
 		return ipc.Response{OK: false, Error: fmt.Sprintf("pause job %s: %v", req.JobID, err)}
 	}
 	return ipc.Response{OK: true, JobID: req.JobID, Message: "checkpoint created"}
@@ -295,7 +304,7 @@ func (d *Daemon) handleResume(req ipc.Request) ipc.Response {
 	if j.Status != store.StatusCheckpointCreated && j.Status != store.StatusRestoreFailed {
 		return ipc.Response{OK: false, Error: fmt.Sprintf("refusing to resume job %s: status is %s, not %s or %s", req.JobID, j.Status, store.StatusCheckpointCreated, store.StatusRestoreFailed)}
 	}
-	if err := d.resumeJob(context.Background(), j); err != nil {
+	if err := d.resumeJob(context.Background(), j, req.RequestedBy); err != nil {
 		return ipc.Response{OK: false, Error: fmt.Sprintf("resume job %s: %v", req.JobID, err)}
 	}
 	updated, err := d.store.Get(req.JobID)
@@ -318,7 +327,7 @@ func (d *Daemon) handleCancel(req ipc.Request) ipc.Response {
 			return ipc.Response{OK: false, Error: fmt.Sprintf("signal job %s: %v", req.JobID, err)}
 		}
 	}
-	if err := d.store.UpdateStatus(req.JobID, store.StatusCanceled, ""); err != nil {
+	if err := d.store.UpdateStatus(req.JobID, store.StatusCanceled, "", req.RequestedBy); err != nil {
 		return ipc.Response{OK: false, Error: err.Error()}
 	}
 	return ipc.Response{OK: true, JobID: req.JobID}
@@ -339,7 +348,7 @@ func (d *Daemon) handleComplete(req ipc.Request) ipc.Response {
 		return ipc.Response{OK: true, JobID: req.JobID, Message: "job already past RUNNING, ignoring stale completion report"}
 	}
 	if req.ExitCode == 0 {
-		if err := d.store.UpdateStatus(req.JobID, store.StatusCompleted, ""); err != nil {
+		if err := d.store.UpdateStatus(req.JobID, store.StatusCompleted, "", req.RequestedBy); err != nil {
 			return ipc.Response{OK: false, Error: err.Error()}
 		}
 		return ipc.Response{OK: true, JobID: req.JobID}
@@ -348,7 +357,7 @@ func (d *Daemon) handleComplete(req ipc.Request) ipc.Response {
 	if reason == "" {
 		reason = fmt.Sprintf("exited with code %d", req.ExitCode)
 	}
-	if err := d.store.UpdateStatus(req.JobID, store.StatusFailed, reason); err != nil {
+	if err := d.store.UpdateStatus(req.JobID, store.StatusFailed, reason, req.RequestedBy); err != nil {
 		return ipc.Response{OK: false, Error: err.Error()}
 	}
 	return ipc.Response{OK: true, JobID: req.JobID}
@@ -360,7 +369,7 @@ func (d *Daemon) handlePrune(req ipc.Request) ipc.Response {
 		if err != nil {
 			return ipc.Response{OK: false, Error: fmt.Sprintf("no such job: %s", req.JobID)}
 		}
-		if !isTerminal(j.Status) {
+		if !store.IsTerminal(j.Status) {
 			return ipc.Response{OK: false, Error: fmt.Sprintf("job %s is not terminal (status %s), refusing to prune", req.JobID, j.Status)}
 		}
 		if err := os.RemoveAll(j.CheckpointDir); err != nil {
@@ -385,27 +394,29 @@ func (d *Daemon) handlePrune(req ipc.Request) ipc.Response {
 	return ipc.Response{OK: true, Message: fmt.Sprintf("pruned %d job(s)", pruned), Failures: failures}
 }
 
-func isTerminal(s store.Status) bool {
-	return s == store.StatusFailed || s == store.StatusCanceled || s == store.StatusCompleted
-}
+// daemonActor is recorded as job_history.changed_by for a status transition
+// the daemon makes on its own (the interruption fan-out), as opposed to one
+// requested by a CLI user.
+const daemonActor = "daemon"
 
 // checkpointJob runs the Checkpoint operation from SPEC-daemon.md, shared by
-// a manual Pause and the interruption fan-out below.
-func (d *Daemon) checkpointJob(ctx context.Context, j store.Job) error {
-	if err := d.store.UpdateStatus(j.ID, store.StatusCheckpointInProgress, ""); err != nil {
+// a manual Pause and the interruption fan-out below. requestedBy is the OS
+// user for a manual pause, or daemonActor for an automatic one.
+func (d *Daemon) checkpointJob(ctx context.Context, j store.Job, requestedBy string) error {
+	if err := d.store.UpdateStatus(j.ID, store.StatusCheckpointInProgress, "", requestedBy); err != nil {
 		log.Printf("checkpoint: job %s: failed to update status: %v", j.ID, err)
 	}
 	d.logDaemon("checkpoint_started", j.ID, "ok", "")
 
 	if err := d.checkpointFunc(ctx, j.CheckpointDir, j); err != nil {
-		if serr := d.store.UpdateStatus(j.ID, store.StatusCheckpointCreationFailed, err.Error()); serr != nil {
+		if serr := d.store.UpdateStatus(j.ID, store.StatusCheckpointCreationFailed, err.Error(), requestedBy); serr != nil {
 			log.Printf("checkpoint: job %s: failed to update status: %v", j.ID, serr)
 		}
 		d.logDaemon("checkpoint_failed", j.ID, "error", err.Error())
 		return err
 	}
 
-	if err := d.store.UpdateStatus(j.ID, store.StatusCheckpointCreated, ""); err != nil {
+	if err := d.store.UpdateStatus(j.ID, store.StatusCheckpointCreated, "", requestedBy); err != nil {
 		log.Printf("checkpoint: job %s: failed to update status: %v", j.ID, err)
 	}
 	d.logDaemon("checkpoint_succeeded", j.ID, "ok", "")
@@ -413,22 +424,22 @@ func (d *Daemon) checkpointJob(ctx context.Context, j store.Job) error {
 }
 
 // resumeJob runs the Resume operation from SPEC-daemon.md.
-func (d *Daemon) resumeJob(ctx context.Context, j store.Job) error {
-	if err := d.store.UpdateStatus(j.ID, store.StatusRestorePending, ""); err != nil {
+func (d *Daemon) resumeJob(ctx context.Context, j store.Job, requestedBy string) error {
+	if err := d.store.UpdateStatus(j.ID, store.StatusRestorePending, "", requestedBy); err != nil {
 		log.Printf("resume: job %s: failed to update status: %v", j.ID, err)
 	}
 	d.logDaemon("restore_started", j.ID, "ok", "")
 
 	pid, err := d.resumeFunc(ctx, j.CheckpointDir, j.HookResume, j.ID)
 	if err != nil {
-		if serr := d.store.UpdateStatus(j.ID, store.StatusRestoreFailed, err.Error()); serr != nil {
+		if serr := d.store.UpdateStatus(j.ID, store.StatusRestoreFailed, err.Error(), requestedBy); serr != nil {
 			log.Printf("resume: job %s: failed to update status: %v", j.ID, serr)
 		}
 		d.logDaemon("restore_failed", j.ID, "error", err.Error())
 		return err
 	}
 
-	if err := d.store.UpdatePID(j.ID, pid, pid); err != nil {
+	if err := d.store.UpdatePID(j.ID, pid, pid, requestedBy); err != nil {
 		log.Printf("resume: job %s: failed to update pid: %v", j.ID, err)
 	}
 	d.logDaemon("restore_succeeded", j.ID, "ok", fmt.Sprintf("pid=%d", pid))
@@ -480,7 +491,7 @@ func (d *Daemon) handleInterruption(sig Signal) {
 		go func(j store.Job) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			_ = d.checkpointJob(context.Background(), j) // already logged internally on failure
+			_ = d.checkpointJob(context.Background(), j, daemonActor) // already logged internally on failure
 		}(j)
 	}
 	wg.Wait()

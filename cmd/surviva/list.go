@@ -58,9 +58,9 @@ func renderJobList(w io.Writer, jobs []store.Job, asJSON bool) int {
 	}
 
 	tw := tabwriter.NewWriter(w, 0, 2, 2, ' ', 0)
-	fmt.Fprintln(tw, "JOB ID\tPID\tSTATUS\tCOMMAND")
+	fmt.Fprintln(tw, "JOB ID\tPID\tSTATUS\tDURATION\tCOMMAND")
 	for _, j := range jobs {
-		fmt.Fprintf(tw, "%s\t%d\t%s\t%s\n", j.ID, j.PID, j.Status, strings.Join(j.Command, " "))
+		fmt.Fprintf(tw, "%s\t%d\t%s\t%s\t%s\n", j.ID, j.PID, j.Status, jobDuration(j), strings.Join(j.Command, " "))
 	}
 	tw.Flush()
 	return 0

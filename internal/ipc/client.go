@@ -48,8 +48,9 @@ func (c *Client) Ping() error {
 }
 
 // Register tells the daemon to start tracking a job and returns its id.
-func (c *Client) Register(j RegisterJob) (string, error) {
-	resp, err := c.call(Request{Action: ActionRegister, Job: &j})
+// requestedBy is recorded as the job's Owner (see cmd/surviva.currentOSUser).
+func (c *Client) Register(j RegisterJob, requestedBy string) (string, error) {
+	resp, err := c.call(Request{Action: ActionRegister, Job: &j, RequestedBy: requestedBy})
 	if err != nil {
 		return "", err
 	}
@@ -65,21 +66,22 @@ func (c *Client) List() ([]store.Job, error) {
 	return resp.Jobs, nil
 }
 
-// Show returns one job regardless of status.
-func (c *Client) Show(jobID string) (store.Job, error) {
-	resp, err := c.call(Request{Action: ActionShow, JobID: jobID})
+// Show returns one job regardless of status, and its full transition history
+// when includeHistory is set (see `surviva show -history`).
+func (c *Client) Show(jobID string, includeHistory bool) (store.Job, []store.HistoryEntry, error) {
+	resp, err := c.call(Request{Action: ActionShow, JobID: jobID, IncludeHistory: includeHistory})
 	if err != nil {
-		return store.Job{}, err
+		return store.Job{}, nil, err
 	}
 	if resp.Job == nil {
-		return store.Job{}, fmt.Errorf("daemon returned no job for %s", jobID)
+		return store.Job{}, nil, fmt.Errorf("daemon returned no job for %s", jobID)
 	}
-	return *resp.Job, nil
+	return *resp.Job, resp.History, nil
 }
 
 // Pause checkpoints a RUNNING job right now.
-func (c *Client) Pause(jobID string) (string, error) {
-	resp, err := c.call(Request{Action: ActionPause, JobID: jobID})
+func (c *Client) Pause(jobID, requestedBy string) (string, error) {
+	resp, err := c.call(Request{Action: ActionPause, JobID: jobID, RequestedBy: requestedBy})
 	if err != nil {
 		return "", err
 	}
@@ -87,8 +89,8 @@ func (c *Client) Pause(jobID string) (string, error) {
 }
 
 // Resume brings a CHECKPOINT_CREATED or RESTORE_FAILED job back to RUNNING.
-func (c *Client) Resume(jobID string) (string, error) {
-	resp, err := c.call(Request{Action: ActionResume, JobID: jobID})
+func (c *Client) Resume(jobID, requestedBy string) (string, error) {
+	resp, err := c.call(Request{Action: ActionResume, JobID: jobID, RequestedBy: requestedBy})
 	if err != nil {
 		return "", err
 	}
@@ -96,15 +98,15 @@ func (c *Client) Resume(jobID string) (string, error) {
 }
 
 // Cancel stops (if running) and marks a job CANCELED.
-func (c *Client) Cancel(jobID string) error {
-	_, err := c.call(Request{Action: ActionCancel, JobID: jobID})
+func (c *Client) Cancel(jobID, requestedBy string) error {
+	_, err := c.call(Request{Action: ActionCancel, JobID: jobID, RequestedBy: requestedBy})
 	return err
 }
 
 // Complete reports that a tracked child exited, moving it to COMPLETED
 // (exitCode == 0) or FAILED otherwise.
-func (c *Client) Complete(jobID string, exitCode int, errMsg string) error {
-	_, err := c.call(Request{Action: ActionComplete, JobID: jobID, ExitCode: exitCode, ErrMsg: errMsg})
+func (c *Client) Complete(jobID string, exitCode int, errMsg, requestedBy string) error {
+	_, err := c.call(Request{Action: ActionComplete, JobID: jobID, ExitCode: exitCode, ErrMsg: errMsg, RequestedBy: requestedBy})
 	return err
 }
 

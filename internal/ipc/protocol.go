@@ -41,22 +41,31 @@ type RegisterJob struct {
 
 // Request is one client -> daemon message.
 type Request struct {
-	Action   Action       `json:"action"`
-	Job      *RegisterJob `json:"job,omitempty"`
-	JobID    string       `json:"job_id,omitempty"` // Show/Pause/Resume/Cancel/Complete/Prune (Prune: empty means "all terminal jobs")
-	ExitCode int          `json:"exit_code,omitempty"`
-	ErrMsg   string       `json:"err_msg,omitempty"`
+	Action Action       `json:"action"`
+	Job    *RegisterJob `json:"job,omitempty"`
+	JobID  string       `json:"job_id,omitempty"` // Show/Pause/Resume/Cancel/Complete/Prune (Prune: empty means "all terminal jobs")
+	// RequestedBy is the OS user running the CLI, captured by surviva-cli
+	// (see cmd/surviva.currentOSUser) for Register/Pause/Resume/Cancel/
+	// Complete. Recorded as store.Job.Owner (Register) and
+	// store.HistoryEntry.ChangedBy (every status transition).
+	RequestedBy string `json:"requested_by,omitempty"`
+	// IncludeHistory asks Show to also return the job's full status-change
+	// history (see Response.History).
+	IncludeHistory bool   `json:"include_history,omitempty"`
+	ExitCode       int    `json:"exit_code,omitempty"`
+	ErrMsg         string `json:"err_msg,omitempty"`
 }
 
 // Response is one daemon -> client message.
 type Response struct {
-	OK       bool        `json:"ok"`
-	Error    string      `json:"error,omitempty"`
-	JobID    string      `json:"job_id,omitempty"`
-	Job      *store.Job  `json:"job,omitempty"`  // Show
-	Jobs     []store.Job `json:"jobs,omitempty"` // List
-	Message  string      `json:"message,omitempty"`
-	Failures []string    `json:"failures,omitempty"` // Prune only
+	OK       bool                 `json:"ok"`
+	Error    string               `json:"error,omitempty"`
+	JobID    string               `json:"job_id,omitempty"`
+	Job      *store.Job           `json:"job,omitempty"`     // Show
+	Jobs     []store.Job          `json:"jobs,omitempty"`    // List
+	History  []store.HistoryEntry `json:"history,omitempty"` // Show, when Request.IncludeHistory is set
+	Message  string               `json:"message,omitempty"`
+	Failures []string             `json:"failures,omitempty"` // Prune only
 }
 
 // DefaultSocketPath returns the socket path clients and the daemon agree on

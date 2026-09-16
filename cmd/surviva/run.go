@@ -79,6 +79,7 @@ func runCmd(args []string) int {
 		}
 	}()
 
+	requestedBy := currentOSUser()
 	client := ipc.NewClient(*socketPath)
 	jobID, regErr := client.Register(ipc.RegisterJob{
 		PID:            pid,
@@ -88,7 +89,7 @@ func runCmd(args []string) int {
 		CheckpointDir:  *checkpointDir,
 		HookCheckpoint: *hookCheckpoint,
 		HookResume:     *hookResume,
-	})
+	}, requestedBy)
 	if regErr != nil {
 		fmt.Fprintf(os.Stderr, "surviva run: warning: could not register with daemon: %v\n", regErr)
 		fmt.Fprintln(os.Stderr, "surviva run: continuing WITHOUT interruption protection")
@@ -100,7 +101,7 @@ func runCmd(args []string) int {
 	exitCode, errMsg := exitCodeAndErr(waitErr)
 
 	if regErr == nil {
-		if err := client.Complete(jobID, exitCode, errMsg); err != nil {
+		if err := client.Complete(jobID, exitCode, errMsg, requestedBy); err != nil {
 			fmt.Fprintf(os.Stderr, "surviva run: warning: failed to report completion for job %s: %v\n", jobID, err)
 		}
 	}

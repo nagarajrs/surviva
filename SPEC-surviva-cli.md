@@ -31,7 +31,7 @@ too, no change.
 | `surviva pause <job-id>` | `Pause` | |
 | `surviva resume <job-id>` | `Resume` | |
 | `surviva list [-json]` | `List` | Active jobs only. |
-| `surviva show [-json] <job-id>` | `Show` | Any status. |
+| `surviva show [-json] [-history] <job-id>` | `Show` | Any status; `-history` also prints every recorded status transition. |
 | `surviva cancel <job-id>` | `Cancel` | |
 | `surviva prune [job-id]` | `Prune` | No id = all terminal jobs. |
 | `surviva daemon [flags]` | — | Runs the daemon itself; see below. |
@@ -52,11 +52,14 @@ change (`Complete` needs an exit code, `legacy`'s `Deregister` didn't):
    reasoning as `legacy`: the child's own session means a terminal's Ctrl-C
    never reaches it directly, and a backgrounded shell script ignores
    SIGINT for itself regardless — a POSIX rule, not a surviva quirk).
-4. `client.Register(...)`. Daemon unreachable or refusing (already
-   interrupted) → warn to stderr, continue running the command
-   unprotected — never block it.
+4. `client.Register(..., requestedBy)`, where `requestedBy` is
+   `currentOSUser()` (`os/user.Current().Username`, falling back to
+   `"unknown"` on error) — recorded by `daemon` as the job's `Owner` and as
+   the first `job_history` entry's `changed_by`. Daemon unreachable or
+   refusing (already interrupted) → warn to stderr, continue running the
+   command unprotected — never block it.
 5. `cmd.Wait()`.
-6. If registered: `client.Complete(jobID, exitCode, errMsg)` — `exitCode` from
+6. If registered: `client.Complete(jobID, exitCode, errMsg, requestedBy)` — `exitCode` from
    `exec.ExitError.ExitCode()` if the command exited nonzero, `0` otherwise;
    `errMsg` empty unless `cmd.Wait()` itself failed for a reason other than
    the child's own exit status (e.g. an I/O error), in which case that
@@ -87,10 +90,21 @@ built request:
 
 ## `surviva list` / `surviva show`
 
-Table for `list` (`JOB ID`, `STATUS`, `PID`, `COMMAND`), a full key:value
-dump for `show` (every `store.Job` field, including `CheckpointDir` and
-`FailureReason` when set). Both take `-json` for the raw `store.Job`/
-`[]store.Job` the daemon returned, same convention as `legacy`'s `list -json`.
+Table for `list` (`JOB ID`, `PID`, `STATUS`, `DURATION`, `COMMAND`), a full
+key:value dump for `show` (every `store.Job` field including `Owner`,
+`CheckpointDir` and `FailureReason` when set, plus a computed `Duration`
+line). Both take `-json` for the raw `store.Job`/`[]store.Job` the daemon
+returned (`show -json` additionally wraps in `duration` and, with
+`-history`, `history`), same convention as `legacy`'s `list -json`.
+
+`Duration` is computed by the CLI, not stored: `time.Since(RegisteredAt)`
+while the job is active, `UpdatedAt.Sub(RegisteredAt)` once it's terminal
+(`store.IsTerminal` tells `jobDuration` which) — see `SPEC-store.md`'s job
+audit trail section for why this isn't a `store` column.
+
+`surviva show -history <job-id>` additionally requests
+`Request.IncludeHistory` and prints every recorded transition (timestamp,
+from → to status, changed by) below the regular detail dump, oldest first.
 
 ## `surviva daemon [flags]`
 
@@ -123,7 +137,8 @@ daemon connection at all — `exitCodeAndErr` (`run`'s exit-code/message
 computation, exercised via a real re-exec'd subprocess for both a clean and
 a nonzero exit), `buildJoinRequest` (`join`'s group-leader refusal), and
 `renderJobList`/`renderJobDetail` (table and `-json` output, including a
-round-trip through `encoding/json`). Every other command
+round-trip through `encoding/json`, and — for `renderJobDetail` — that
+history entries print when given and are absent otherwise). Every other command
 (`pause`/`resume`/`cancel`/`prune`) is a straight-line "parse flags, call
 the client, print one line" with no branching worth a dedicated unit test —
 a fake-client interface for those would be untested scaffolding, so it

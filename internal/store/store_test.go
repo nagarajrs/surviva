@@ -55,6 +55,7 @@ func newJob() Job {
 		Command:       []string{"sleep", "300"},
 		WorkDir:       "/tmp",
 		Status:        StatusRunning,
+		Owner:         "alice",
 		RegisteredAt:  now,
 		UpdatedAt:     now,
 	}
@@ -94,7 +95,7 @@ func TestInsertGetRoundTrip(t *testing.T) {
 	}
 	if got.ID != id || got.PID != j.PID || got.PGID != j.PGID || got.CheckpointDir != j.CheckpointDir ||
 		got.WorkDir != j.WorkDir || got.HookCheckpoint != j.HookCheckpoint || got.HookResume != j.HookResume ||
-		got.Status != j.Status || len(got.Command) != 2 || got.Command[0] != "sleep" || got.Command[1] != "300" {
+		got.Status != j.Status || got.Owner != j.Owner || len(got.Command) != 2 || got.Command[0] != "sleep" || got.Command[1] != "300" {
 		t.Fatalf("round-trip mismatch: got %+v, want %+v (id %s)", got, j, id)
 	}
 }
@@ -217,7 +218,7 @@ func TestUpdateStatusRejectsInvalidTransition(t *testing.T) {
 	j := newJob()
 	j.Status = StatusCompleted
 	id := insertJob(t, s, j)
-	if err := s.UpdateStatus(id, StatusRunning, ""); err == nil {
+	if err := s.UpdateStatus(id, StatusRunning, "", "tester"); err == nil {
 		t.Fatal("expected UpdateStatus to reject COMPLETED -> RUNNING")
 	}
 }
@@ -227,7 +228,7 @@ func TestUpdateStatusSetsFailureReason(t *testing.T) {
 	j := newJob()
 	j.Status = StatusCheckpointInProgress
 	id := insertJob(t, s, j)
-	if err := s.UpdateStatus(id, StatusCheckpointCreationFailed, "criu dump: disk full"); err != nil {
+	if err := s.UpdateStatus(id, StatusCheckpointCreationFailed, "criu dump: disk full", "tester"); err != nil {
 		t.Fatalf("UpdateStatus: %v", err)
 	}
 	got, err := s.Get(id)
@@ -248,7 +249,7 @@ func TestUpdatePIDResumesToRunning(t *testing.T) {
 	j.Status = StatusRestorePending
 	j.PID, j.PGID = 111, 111
 	id := insertJob(t, s, j)
-	if err := s.UpdatePID(id, 999, 999); err != nil {
+	if err := s.UpdatePID(id, 999, 999, "tester"); err != nil {
 		t.Fatalf("UpdatePID: %v", err)
 	}
 	got, err := s.Get(id)
@@ -277,5 +278,53 @@ func TestUpdateCheckpointDir(t *testing.T) {
 	}
 	if got.CheckpointDir != dir {
 		t.Errorf("CheckpointDir = %q, want %q", got.CheckpointDir, dir)
+	}
+}
+
+func TestHistoryRecordsEveryTransition(t *testing.T) {
+	s := openTestStore(t)
+	id := insertJob(t, s, newJob())
+
+	if err := s.UpdateStatus(id, StatusCheckpointInProgress, "", "alice"); err != nil {
+		t.Fatalf("UpdateStatus: %v", err)
+	}
+	if err := s.UpdateStatus(id, StatusCheckpointCreated, "", "daemon"); err != nil {
+		t.Fatalf("UpdateStatus: %v", err)
+	}
+
+	hist, err := s.History(id)
+	if err != nil {
+		t.Fatalf("History: %v", err)
+	}
+	want := []struct {
+		from, to  Status
+		changedBy string
+	}{
+		{StatusRunning, StatusCheckpointInProgress, "alice"},
+		{StatusCheckpointInProgress, StatusCheckpointCreated, "daemon"},
+	}
+	if len(hist) != len(want) {
+		t.Fatalf("got %d history entries, want %d: %+v", len(hist), len(want), hist)
+	}
+	for i, w := range want {
+		if hist[i].JobID != id || hist[i].FromStatus != w.from || hist[i].ToStatus != w.to || hist[i].ChangedBy != w.changedBy {
+			t.Errorf("entry %d = %+v, want from=%s to=%s changedBy=%s", i, hist[i], w.from, w.to, w.changedBy)
+		}
+		if hist[i].ChangedAt.IsZero() {
+			t.Errorf("entry %d: ChangedAt is zero", i)
+		}
+	}
+}
+
+func TestIsTerminal(t *testing.T) {
+	for _, st := range []Status{StatusFailed, StatusCanceled, StatusCompleted} {
+		if !IsTerminal(st) {
+			t.Errorf("IsTerminal(%s) = false, want true", st)
+		}
+	}
+	for _, st := range []Status{StatusRunning, StatusCheckpointInProgress, StatusCheckpointCreated} {
+		if IsTerminal(st) {
+			t.Errorf("IsTerminal(%s) = true, want false", st)
+		}
 	}
 }

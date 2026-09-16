@@ -51,7 +51,7 @@ func joinCmd(args []string) int {
 	}
 
 	client := ipc.NewClient(*socketPath)
-	jobID, err := client.Register(req)
+	jobID, err := client.Register(req, currentOSUser())
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "surviva join: %v\n", err)
 		logCLI(al, "join", "", "error", err.Error())

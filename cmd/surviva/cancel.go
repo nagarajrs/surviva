@@ -32,7 +32,7 @@ func cancelCmd(args []string) int {
 	}
 
 	client := ipc.NewClient(*socketPath)
-	if err := client.Cancel(jobID); err != nil {
+	if err := client.Cancel(jobID, currentOSUser()); err != nil {
 		fmt.Fprintf(os.Stderr, "surviva cancel: %v\n", err)
 		logCLI(al, "cancel", jobID, "error", err.Error())
 		return 1

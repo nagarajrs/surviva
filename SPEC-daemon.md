@@ -173,14 +173,22 @@ goes through `store.UpdateStatus`/`UpdatePID`, which already reject an
 invalid `from` state — `daemon` doesn't need its own separate guard on top,
 just surface `store`'s error back over IPC.
 
+Every `store.UpdateStatus`/`UpdatePID` call below also takes a `changedBy`
+argument — `req.RequestedBy` (the OS user `surviva-cli` captured, see
+`SPEC-surviva-cli.md`) for a CLI-driven transition, or the literal string
+`"daemon"` for one the daemon makes on its own (the interruption fan-out).
+`store` records it as a `job_history` row in the same transaction as the
+status update — see `SPEC-store.md`'s job audit trail section. Omitted below
+for brevity; assume every `UpdateStatus`/`UpdatePID` call takes it.
+
 **Checkpoint** (triggered by `Pause` below, or by the interruption fan-out —
 identical code path either way):
-1. `store.UpdateStatus(id, CHECKPOINT_IN_PROGRESS, "")`
+1. `store.UpdateStatus(id, CHECKPOINT_IN_PROGRESS, "", changedBy)`
 2. `audit.Log({daemon, checkpoint_started, id, ok})`
 3. `checkpoint.Run(ctx, job.CheckpointDir, job)`
-4. Success → `store.UpdateStatus(id, CHECKPOINT_CREATED, "")`,
+4. Success → `store.UpdateStatus(id, CHECKPOINT_CREATED, "", changedBy)`,
    `audit.Log({daemon, checkpoint_succeeded, id, ok})`.
-   Failure → `store.UpdateStatus(id, CHECKPOINT_CREATION_FAILED, err.Error())`,
+   Failure → `store.UpdateStatus(id, CHECKPOINT_CREATION_FAILED, err.Error(), changedBy)`,
    `audit.Log({daemon, checkpoint_failed, id, error, err.Error()})`.
 
 No separate "storage push" step exists yet (S3/EBS is out of scope), so
@@ -188,20 +196,20 @@ No separate "storage push" step exists yet (S3/EBS is out of scope), so
 matching `legacy`'s original local-disk-only mode.
 
 **Resume** (from `CHECKPOINT_CREATED` or `RESTORE_FAILED`):
-1. `store.UpdateStatus(id, RESTORE_PENDING, "")`
+1. `store.UpdateStatus(id, RESTORE_PENDING, "", changedBy)`
 2. `audit.Log({daemon, restore_started, id, ok})`
 3. `resume.Run(ctx, job.CheckpointDir, job.HookResume, job.ID)` → new pid
-4. Success → `store.UpdatePID(id, pid, pid)` (moves to `RUNNING` per
-   `store`'s own transition table), `audit.Log({daemon, restore_succeeded, id, ok})`.
-   Failure → `store.UpdateStatus(id, RESTORE_FAILED, err.Error())`,
+4. Success → `store.UpdatePID(id, pid, pid, changedBy)` (moves to `RUNNING`
+   per `store`'s own transition table), `audit.Log({daemon, restore_succeeded, id, ok})`.
+   Failure → `store.UpdateStatus(id, RESTORE_FAILED, err.Error(), changedBy)`,
    `audit.Log({daemon, restore_failed, id, error, err.Error()})`.
 
 **Cancel:**
 - If `RUNNING`: `procsignal.KillGroup(job.PGID, SIGTERM)`, then
-  `store.UpdateStatus(id, CANCELED, "")`.
+  `store.UpdateStatus(id, CANCELED, "", req.RequestedBy)`.
 - If `CHECKPOINT_CREATED` / `CHECKPOINT_CREATION_FAILED` / `RESTORE_FAILED`:
   no live process to signal (already stopped or never resumed) — just
-  `store.UpdateStatus(id, CANCELED, "")`.
+  `store.UpdateStatus(id, CANCELED, "", req.RequestedBy)`.
 - If `CHECKPOINT_IN_PROGRESS` / `RESTORE_PENDING`: rejected by `store`
   (no valid transition out of those to `CANCELED`) — surfaced as "job is
   mid-checkpoint/restore, try again once it settles."
@@ -211,7 +219,8 @@ matching `legacy`'s original local-disk-only mode.
 
 **Complete** (the CLI reports its tracked child exited — normal end of
 `run`/`join`, not a checkpoint):
-- Request carries `JobID`, `ExitCode`, optional `ErrMsg`.
+- Request carries `JobID`, `ExitCode`, optional `ErrMsg`, `RequestedBy` (the
+  OS user who ran `surviva run`, forwarded as `changedBy`).
 - If current status isn't `RUNNING` anymore, this is a no-op (not an error)
   — exactly `legacy`'s deregister race: the checkpoint subsystem may have
   already moved the job past `RUNNING` (CRIU's dump stops the process,
@@ -226,13 +235,20 @@ the request):
 1. Refused if the interruption latch (below) is set — same reasoning as
    `legacy`: a job registered after a signal already fired has no realistic
    path to being saved.
-2. `id, err := store.Insert(Job{..., CheckpointDir: req.CheckpointDir, Status: RUNNING})`
+2. `id, err := store.Insert(Job{..., CheckpointDir: req.CheckpointDir, Status: RUNNING, Owner: req.RequestedBy})`
    — `store` itself assigns `id` (sequential, see `SPEC-store.md`); if the
    request gave no `CheckpointDir` override, `Insert`'s value is empty at
-   this point.
+   this point. `Owner` is set once here and never changes — it answers "who
+   initiated this job," a separate question from `job_history.changed_by`
+   ("who/what changed its status," which can be a different actor, e.g. the
+   daemon checkpointing it during an interruption).
 3. If no override was given: `dir := filepath.Join(cfg.CheckpointBaseDir, id)`,
    then `store.UpdateCheckpointDir(id, dir)` — this couldn't happen before
    step 2 because the default path needs the id `Insert` only just assigned.
+
+**Show** additionally accepts `req.IncludeHistory`: when set, it also calls
+`store.History(id)` and returns the result as `Response.History` — backs
+`surviva show -history`.
 
 **Prune** (backs a future `surviva prune [job-id]` — clears checkpoint
 *files* off disk, never touches `store` rows; a pruned job stays fully
@@ -293,21 +309,24 @@ type RegisterJob struct {
 }
 
 type Request struct {
-    Action   Action
-    Job      *RegisterJob // Register
-    JobID    string       // Show/Pause/Resume/Cancel/Complete/Prune (Prune: empty means "all terminal jobs")
-    ExitCode int          // Complete
-    ErrMsg   string       // Complete, optional
+    Action         Action
+    Job            *RegisterJob // Register
+    JobID          string       // Show/Pause/Resume/Cancel/Complete/Prune (Prune: empty means "all terminal jobs")
+    RequestedBy    string       // Register/Pause/Resume/Cancel/Complete: the OS user running the CLI (see SPEC-surviva-cli.md)
+    IncludeHistory bool         // Show: also return the job's full status-change history
+    ExitCode       int          // Complete
+    ErrMsg         string       // Complete, optional
 }
 
 type Response struct {
     OK       bool
     Error    string
     JobID    string
-    Job      *store.Job  // Show
-    Jobs     []store.Job // List
-    Message  string      // e.g. "resumed as pid 4821", "pruned 3 job(s)"
-    Failures []string    // Prune only: "<job-id>: <error>" for any that failed to clean up
+    Job      *store.Job           // Show
+    Jobs     []store.Job          // List
+    History  []store.HistoryEntry // Show, when Request.IncludeHistory is set
+    Message  string               // e.g. "resumed as pid 4821", "pruned 3 job(s)"
+    Failures []string             // Prune only: "<job-id>: <error>" for any that failed to clean up
 }
 ```
 
@@ -323,7 +342,10 @@ CRIU itself needs a real Linux box (per `legacy`'s own testing-strategy
 philosophy — real infra over mocks); that part is manual/integration, not
 `go test ./...`. What *is* unit-testable here, against a temp-file `store` +
 `auditlog` and a fake `Provider` that never fires:
-- `Register` → `List` shows it, `Show` finds it by id.
+- `Register` → `List` shows it, `Show` finds it by id, `Job.Owner` matches
+  `RequestedBy`. `Show` with `IncludeHistory` returns every recorded
+  transition (`ChangedBy` matching whoever/whatever made each one); without
+  it, `Response.History` is empty.
 - `Register` refused once the interruption latch is set.
 - `Complete` on a still-`RUNNING` job sets `COMPLETED`/`FAILED` correctly by
   exit code; `Complete` on a job no longer `RUNNING` is a no-op, not an

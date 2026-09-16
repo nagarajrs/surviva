@@ -82,6 +82,14 @@ func ValidTransition(from, to Status) bool {
 	return false
 }
 
+// IsTerminal reports whether a status is one List() drops off (FAILED,
+// CANCELED, COMPLETED). Exported so callers like surviva-cli can decide
+// whether to compute a job's running duration against time.Now() or
+// UpdatedAt.
+func IsTerminal(s Status) bool {
+	return terminalStatuses[s]
+}
+
 // Job is a single unit of work surviva is tracking. ID is a sequential
 // integer, formatted as a string (Slurm-style: "1", "2", "3", ...) --
 // assigned by Insert, not the caller.
@@ -96,8 +104,19 @@ type Job struct {
 	HookResume     string
 	Status         Status
 	FailureReason  string
+	Owner          string // OS user who ran `surviva run`/`join`, captured at registration
 	RegisteredAt   time.Time
 	UpdatedAt      time.Time
+}
+
+// HistoryEntry is one append-only record of a job's status transition. Backs
+// `surviva show -history`.
+type HistoryEntry struct {
+	JobID      string
+	FromStatus Status
+	ToStatus   Status
+	ChangedBy  string
+	ChangedAt  time.Time
 }
 
 const sqliteSchema = `
@@ -112,8 +131,18 @@ CREATE TABLE IF NOT EXISTS jobs (
 	hook_resume     TEXT NOT NULL DEFAULT '',
 	status          TEXT NOT NULL,
 	failure_reason  TEXT NOT NULL DEFAULT '',
+	owner           TEXT NOT NULL DEFAULT '',
 	registered_at   DATETIME NOT NULL,
 	updated_at      DATETIME NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS job_history (
+	id          INTEGER PRIMARY KEY AUTOINCREMENT,
+	job_id      INTEGER NOT NULL,
+	from_status TEXT NOT NULL,
+	to_status   TEXT NOT NULL,
+	changed_by  TEXT NOT NULL,
+	changed_at  DATETIME NOT NULL
 );
 `
 
@@ -135,8 +164,18 @@ CREATE TABLE IF NOT EXISTS jobs (
 	hook_resume     TEXT NOT NULL,
 	status          VARCHAR(64) NOT NULL,
 	failure_reason  TEXT NOT NULL,
+	owner           VARCHAR(255) NOT NULL,
 	registered_at   DATETIME NOT NULL,
 	updated_at      DATETIME NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS job_history (
+	id          BIGINT PRIMARY KEY AUTO_INCREMENT,
+	job_id      BIGINT NOT NULL,
+	from_status VARCHAR(64) NOT NULL,
+	to_status   VARCHAR(64) NOT NULL,
+	changed_by  VARCHAR(255) NOT NULL,
+	changed_at  DATETIME NOT NULL
 );
 `
 
@@ -182,7 +221,8 @@ func Open(opts Options) (*Store, error) {
 		cfg.Net = "tcp"
 		cfg.Addr = fmt.Sprintf("%s:%d", opts.Host, opts.Port)
 		cfg.DBName = opts.DBName
-		cfg.ParseTime = true // RegisteredAt/UpdatedAt scan straight into time.Time, like sqlite already does
+		cfg.ParseTime = true       // RegisteredAt/UpdatedAt scan straight into time.Time, like sqlite already does
+		cfg.MultiStatements = true // mysqlSchema is more than one CREATE TABLE in a single Exec
 		dsn = cfg.FormatDSN()
 		ddl = mysqlSchema
 	default:
@@ -220,9 +260,9 @@ func (s *Store) Insert(j Job) (string, error) {
 		return "", fmt.Errorf("marshal command: %w", err)
 	}
 	res, err := s.db.Exec(
-		`INSERT INTO jobs (pid, pgid, checkpoint_dir, command, work_dir, hook_checkpoint, hook_resume, status, failure_reason, registered_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		j.PID, j.PGID, j.CheckpointDir, string(cmdJSON), j.WorkDir, j.HookCheckpoint, j.HookResume, string(j.Status), j.FailureReason, j.RegisteredAt, j.UpdatedAt,
+		`INSERT INTO jobs (pid, pgid, checkpoint_dir, command, work_dir, hook_checkpoint, hook_resume, status, failure_reason, owner, registered_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		j.PID, j.PGID, j.CheckpointDir, string(cmdJSON), j.WorkDir, j.HookCheckpoint, j.HookResume, string(j.Status), j.FailureReason, j.Owner, j.RegisteredAt, j.UpdatedAt,
 	)
 	if err != nil {
 		return "", fmt.Errorf("insert job: %w", err)
@@ -241,7 +281,7 @@ func (s *Store) Get(id string) (Job, error) {
 		return Job{}, err
 	}
 	row := s.db.QueryRow(
-		`SELECT id, pid, pgid, checkpoint_dir, command, work_dir, hook_checkpoint, hook_resume, status, failure_reason, registered_at, updated_at
+		`SELECT id, pid, pgid, checkpoint_dir, command, work_dir, hook_checkpoint, hook_resume, status, failure_reason, owner, registered_at, updated_at
 		 FROM jobs WHERE id = ?`, idInt,
 	)
 	return scanJob(row)
@@ -250,7 +290,7 @@ func (s *Store) Get(id string) (Job, error) {
 // List returns every active (non-terminal) job. Backs `surviva list`.
 func (s *Store) List() ([]Job, error) {
 	rows, err := s.db.Query(
-		`SELECT id, pid, pgid, checkpoint_dir, command, work_dir, hook_checkpoint, hook_resume, status, failure_reason, registered_at, updated_at
+		`SELECT id, pid, pgid, checkpoint_dir, command, work_dir, hook_checkpoint, hook_resume, status, failure_reason, owner, registered_at, updated_at
 		 FROM jobs WHERE status NOT IN (?, ?, ?) ORDER BY registered_at ASC`,
 		string(StatusFailed), string(StatusCanceled), string(StatusCompleted),
 	)
@@ -275,7 +315,7 @@ func (s *Store) List() ([]Job, error) {
 // find every terminal job's CheckpointDir without touching active jobs.
 func (s *Store) ListTerminal() ([]Job, error) {
 	rows, err := s.db.Query(
-		`SELECT id, pid, pgid, checkpoint_dir, command, work_dir, hook_checkpoint, hook_resume, status, failure_reason, registered_at, updated_at
+		`SELECT id, pid, pgid, checkpoint_dir, command, work_dir, hook_checkpoint, hook_resume, status, failure_reason, owner, registered_at, updated_at
 		 FROM jobs WHERE status IN (?, ?, ?) ORDER BY registered_at ASC`,
 		string(StatusFailed), string(StatusCanceled), string(StatusCompleted),
 	)
@@ -297,8 +337,10 @@ func (s *Store) ListTerminal() ([]Job, error) {
 
 // UpdateStatus moves a job to a new status, validating the transition and
 // refreshing updated_at. failureReason is stored as-is (pass "" if not
-// applicable to the target status).
-func (s *Store) UpdateStatus(id string, to Status, failureReason string) error {
+// applicable to the target status). changedBy is recorded as-is in the
+// append-only job_history table (the OS user for a CLI-driven change, or
+// "daemon" for an automatic one) -- see History.
+func (s *Store) UpdateStatus(id string, to Status, failureReason, changedBy string) error {
 	idInt, err := parseID(id)
 	if err != nil {
 		return err
@@ -310,9 +352,17 @@ func (s *Store) UpdateStatus(id string, to Status, failureReason string) error {
 	if !ValidTransition(existing.Status, to) {
 		return fmt.Errorf("invalid transition for job %s: %s -> %s", id, existing.Status, to)
 	}
-	res, err := s.db.Exec(
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("update job %s: %w", id, err)
+	}
+	defer tx.Rollback()
+
+	now := time.Now().UTC()
+	res, err := tx.Exec(
 		`UPDATE jobs SET status = ?, failure_reason = ?, updated_at = ? WHERE id = ?`,
-		string(to), failureReason, time.Now().UTC(), idInt,
+		string(to), failureReason, now, idInt,
 	)
 	if err != nil {
 		return fmt.Errorf("update job %s: %w", id, err)
@@ -320,12 +370,16 @@ func (s *Store) UpdateStatus(id string, to Status, failureReason string) error {
 	if n, _ := res.RowsAffected(); n == 0 {
 		return fmt.Errorf("job %s not found", id)
 	}
-	return nil
+	if err := recordHistory(tx, idInt, existing.Status, to, changedBy, now); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // UpdatePID rewrites a job's pid/pgid and moves it to RUNNING -- used when a
-// resume brings the same job id back to life under a new process.
-func (s *Store) UpdatePID(id string, pid, pgid int) error {
+// resume brings the same job id back to life under a new process. changedBy
+// is recorded the same way as in UpdateStatus.
+func (s *Store) UpdatePID(id string, pid, pgid int, changedBy string) error {
 	idInt, err := parseID(id)
 	if err != nil {
 		return err
@@ -337,9 +391,17 @@ func (s *Store) UpdatePID(id string, pid, pgid int) error {
 	if !ValidTransition(existing.Status, StatusRunning) {
 		return fmt.Errorf("invalid transition for job %s: %s -> %s", id, existing.Status, StatusRunning)
 	}
-	res, err := s.db.Exec(
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("update job %s: %w", id, err)
+	}
+	defer tx.Rollback()
+
+	now := time.Now().UTC()
+	res, err := tx.Exec(
 		`UPDATE jobs SET pid = ?, pgid = ?, status = ?, updated_at = ? WHERE id = ?`,
-		pid, pgid, string(StatusRunning), time.Now().UTC(), idInt,
+		pid, pgid, string(StatusRunning), now, idInt,
 	)
 	if err != nil {
 		return fmt.Errorf("update job %s: %w", id, err)
@@ -347,7 +409,57 @@ func (s *Store) UpdatePID(id string, pid, pgid int) error {
 	if n, _ := res.RowsAffected(); n == 0 {
 		return fmt.Errorf("job %s not found", id)
 	}
+	if err := recordHistory(tx, idInt, existing.Status, StatusRunning, changedBy, now); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// recordHistory appends one job_history row as part of an in-flight
+// transaction, so a status change and its history entry always land
+// together.
+func recordHistory(tx *sql.Tx, jobID int64, from, to Status, changedBy string, at time.Time) error {
+	if _, err := tx.Exec(
+		`INSERT INTO job_history (job_id, from_status, to_status, changed_by, changed_at) VALUES (?, ?, ?, ?, ?)`,
+		jobID, string(from), string(to), changedBy, at,
+	); err != nil {
+		return fmt.Errorf("record history for job %d: %w", jobID, err)
+	}
 	return nil
+}
+
+// History returns every recorded status transition for a job, oldest first.
+// Backs `surviva show -history`.
+func (s *Store) History(id string) ([]HistoryEntry, error) {
+	idInt, err := parseID(id)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := s.db.Query(
+		`SELECT job_id, from_status, to_status, changed_by, changed_at FROM job_history WHERE job_id = ? ORDER BY id ASC`,
+		idInt,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list history for job %s: %w", id, err)
+	}
+	defer rows.Close()
+
+	var entries []HistoryEntry
+	for rows.Next() {
+		var (
+			h                    HistoryEntry
+			jobID                int64
+			fromStatus, toStatus string
+		)
+		if err := rows.Scan(&jobID, &fromStatus, &toStatus, &h.ChangedBy, &h.ChangedAt); err != nil {
+			return nil, fmt.Errorf("scan history row: %w", err)
+		}
+		h.JobID = strconv.FormatInt(jobID, 10)
+		h.FromStatus = Status(fromStatus)
+		h.ToStatus = Status(toStatus)
+		entries = append(entries, h)
+	}
+	return entries, rows.Err()
 }
 
 // UpdateCheckpointDir sets a job's checkpoint directory. Used once at
@@ -393,7 +505,7 @@ func scanJob(row rowScanner) (Job, error) {
 		cmdJSON string
 		status  string
 	)
-	if err := row.Scan(&id, &j.PID, &j.PGID, &j.CheckpointDir, &cmdJSON, &j.WorkDir, &j.HookCheckpoint, &j.HookResume, &status, &j.FailureReason, &j.RegisteredAt, &j.UpdatedAt); err != nil {
+	if err := row.Scan(&id, &j.PID, &j.PGID, &j.CheckpointDir, &cmdJSON, &j.WorkDir, &j.HookCheckpoint, &j.HookResume, &status, &j.FailureReason, &j.Owner, &j.RegisteredAt, &j.UpdatedAt); err != nil {
 		return Job{}, fmt.Errorf("scan job row: %w", err)
 	}
 	j.ID = strconv.FormatInt(id, 10)

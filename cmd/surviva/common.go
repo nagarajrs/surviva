@@ -3,10 +3,22 @@ package main
 import (
 	"fmt"
 	"os"
+	"os/user"
 
 	"surviva/internal/auditlog"
 	"surviva/internal/config"
 )
+
+// currentOSUser returns the OS username running this CLI invocation, for
+// attribution in store.Job.Owner and store.HistoryEntry.ChangedBy. Falls
+// back to "unknown" rather than failing the command outright.
+func currentOSUser() string {
+	u, err := user.Current()
+	if err != nil {
+		return "unknown"
+	}
+	return u.Username
+}
 
 // openAuditLogger loads confPath just to find AuditLogPath and opens the
 // shared audit log. A failure here is never fatal to the command's actual
