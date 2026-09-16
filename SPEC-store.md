@@ -145,13 +145,12 @@ temp-file DB (matches legacy's approach — no new test infra needed):
 
 ## Open Questions
 
-1. **Are `CHECKPOINT_CREATION_FAILED` and `RESTORE_FAILED` "active" or
-   "terminal" for `List()`?** Taking both as *active* here (stuck and
-   needing attention, not finished — should still show in `surviva list`
-   until someone cancels or retries) and giving both a symmetric
-   retry/cancel path in the transition table above. Say so now if either (or
-   both) should behave like a terminal state instead — i.e. drop off `list`
-   the moment the failure happens, only visible via `show` from then on.
+None remaining.
+
+1. ~~Are `CHECKPOINT_CREATION_FAILED` and `RESTORE_FAILED` "active" or
+   "terminal" for `List()`?~~ **Confirmed active** — both stay in `list`
+   until cancelled or retried, per the symmetric retry/cancel transitions
+   above.
 2. **`surviva join <PID>`, resolved into scope.** Confirmed: a future
    `surviva-cli` command to adopt an already-running, externally-started
    process into tracking (not launched via `surviva run`). `store`'s model
