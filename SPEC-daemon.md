@@ -28,10 +28,13 @@ be corrected to say so.
 | `internal/resume` (`Run`) | None — it already took a full dir. |
 | `internal/imds` (`Client`, `Poller`) | Wrapped behind a new `Provider` interface (below) so Azure/GCP can be added later as siblings, not a rewrite. |
 | `internal/procsignal` (`KillGroup`) | None — used by `Cancel`. |
-| `internal/idgen` (`New`) | None — used by `Register`. |
 
 Not reused (out of scope per the capability map): `internal/remote`
-(S3/DynamoDB), `internal/ebsmount`.
+(S3/DynamoDB), `internal/ebsmount`. `internal/idgen` (used in an earlier
+draft of `Register`) was dropped entirely and removed from the tree — job
+ids are Slurm-style sequential integers now, assigned by `store.Insert`'s
+`INTEGER PRIMARY KEY AUTOINCREMENT` column instead of app-level random
+generation. See `SPEC-store.md`.
 
 ## Cloud provider abstraction
 
@@ -127,11 +130,13 @@ the request):
 1. Refused if the interruption latch (below) is set — same reasoning as
    `legacy`: a job registered after a signal already fired has no realistic
    path to being saved.
-2. `id := idgen.New()`.
-3. `CheckpointDir`: use the request's value if given (an explicit override,
-   e.g. from a future `--checkpoint-dir` flag), else
-   `filepath.Join(cfg.CheckpointBaseDir, id)`.
-4. `store.Insert(Job{..., Status: RUNNING})`.
+2. `id, err := store.Insert(Job{..., CheckpointDir: req.CheckpointDir, Status: RUNNING})`
+   — `store` itself assigns `id` (sequential, see `SPEC-store.md`); if the
+   request gave no `CheckpointDir` override, `Insert`'s value is empty at
+   this point.
+3. If no override was given: `dir := filepath.Join(cfg.CheckpointBaseDir, id)`,
+   then `store.UpdateCheckpointDir(id, dir)` — this couldn't happen before
+   step 2 because the default path needs the id `Insert` only just assigned.
 
 **Prune** (backs a future `surviva prune [job-id]` — clears checkpoint
 *files* off disk, never touches `store` rows; a pruned job stays fully

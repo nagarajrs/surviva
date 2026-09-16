@@ -31,6 +31,9 @@ const (
     StatusCompleted                Status = "COMPLETED"
 )
 
+// ID is a sequential integer formatted as a string ("1", "2", "3", ...) --
+// Slurm-style, easy to remember and type, assigned by Insert (SQLite
+// AUTOINCREMENT), never chosen by the caller.
 type Job struct {
     ID             string
     PID            int
@@ -52,14 +55,22 @@ first draft so the Go identifier actually matches its `"CHECKPOINT_IN_PROGRESS"`
 value — no behavior change.)
 
 **`CheckpointDir` is a real column now** (reversing the first draft's "compute
-it deterministically, don't store it" call): the caller decides this value at
-`Insert` time and `store` just persists it verbatim. `daemon` fills it in as
+it deterministically, don't store it" call): the caller decides this value and
+`store` just persists it verbatim. `daemon` fills it in as
 `filepath.Join(config.CheckpointBaseDir, jobID)` by default, or with whatever
 path `surviva run --checkpoint-dir <path>` passed through, if the user
 overrode it. `store` itself has no dependency on `config` and doesn't compute
 or validate this path — it's an opaque string as far as this module is
 concerned, matching the "store depends on nothing" line in the capability
 map.
+
+**Chicken-and-egg with sequential IDs:** the default `CheckpointDir` needs
+the job's id, but the id isn't known until `Insert` assigns it. `Insert`
+therefore takes a `Job` with `CheckpointDir` set only when the caller has an
+explicit override; if not, the caller inserts first, gets the id back, then
+calls the new `UpdateCheckpointDir` (below) with the now-computable default
+path. Two round trips instead of one, but keeps `Insert`'s contract simple
+(one `Job` in, one id out) rather than teaching it to compute paths itself.
 
 ### Status transitions
 
@@ -96,13 +107,21 @@ invalid transition is a caller bug, not a recoverable runtime condition, so
 func Open(path string) (*Store, error) // creates path's parent directory if missing
 func (s *Store) Close() error
 
-func (s *Store) Insert(j Job) error
+func (s *Store) Insert(j Job) (string, error)                         // ignores j.ID, returns the assigned sequential id
 func (s *Store) Get(id string) (Job, error)                          // any status — backs `show`
 func (s *Store) List() ([]Job, error)                                 // active only — backs `list`
 func (s *Store) ListTerminal() ([]Job, error)                         // FAILED/CANCELED/COMPLETED only — backs `prune`
 func (s *Store) UpdateStatus(id string, to Status, failureReason string) error
 func (s *Store) UpdatePID(id string, pid, pgid int) error             // resume reusing the same job ID
+func (s *Store) UpdateCheckpointDir(id, dir string) error             // fills in the default path once id is known
 ```
+
+`Get`/`UpdateStatus`/`UpdatePID`/`UpdateCheckpointDir` all parse `id` into an
+integer before querying (a job id that isn't a plain number is rejected with
+a clear error, not a cryptic SQL failure) — the jobs table's `id` column is
+`INTEGER PRIMARY KEY AUTOINCREMENT`, not `TEXT`; `Job.ID` stays a Go `string`
+throughout the rest of the system (`ipc`, `daemon`, `surviva-cli`) purely so
+nothing above `store` has to care that it's numeric underneath.
 
 `ListTerminal()` is `List()`'s mirror image — `WHERE status IN
 ('FAILED','CANCELED','COMPLETED')` — added for the future `surviva prune`
@@ -120,7 +139,9 @@ contract.
 
 `go test ./...` in this package, table-driven, `modernc.org/sqlite` against a
 temp-file DB (matches legacy's approach — no new test infra needed):
+- Successive `Insert` calls return "1", "2", "3", ... in order.
 - Insert → Get round-trips every field, `CheckpointDir` included.
+- `Get`/`UpdateStatus`/`UpdatePID` reject a non-numeric job id cleanly.
 - `List()` excludes each terminal status, includes each active one
   (`CHECKPOINT_CREATION_FAILED` and `RESTORE_FAILED` included, per the
   "active" default below).

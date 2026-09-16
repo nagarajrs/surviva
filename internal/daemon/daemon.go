@@ -19,7 +19,6 @@ import (
 
 	"surviva/internal/auditlog"
 	"surviva/internal/checkpoint"
-	"surviva/internal/idgen"
 	"surviva/internal/ipc"
 	"surviva/internal/procsignal"
 	"surviva/internal/resume"
@@ -165,17 +164,11 @@ func (d *Daemon) handleRegister(req ipc.Request) ipc.Response {
 		return ipc.Response{OK: false, Error: "daemon has already received an interruption signal; refusing new registrations"}
 	}
 
-	id := idgen.New()
-	dir := req.Job.CheckpointDir
-	if dir == "" {
-		dir = filepath.Join(d.checkpointBaseDir, id)
-	}
 	now := time.Now().UTC()
 	j := store.Job{
-		ID:             id,
 		PID:            req.Job.PID,
 		PGID:           req.Job.PGID,
-		CheckpointDir:  dir,
+		CheckpointDir:  req.Job.CheckpointDir, // may be empty; filled in below if so
 		Command:        req.Job.Command,
 		WorkDir:        req.Job.WorkDir,
 		HookCheckpoint: req.Job.HookCheckpoint,
@@ -184,8 +177,17 @@ func (d *Daemon) handleRegister(req ipc.Request) ipc.Response {
 		RegisteredAt:   now,
 		UpdatedAt:      now,
 	}
-	if err := d.store.Insert(j); err != nil {
+	id, err := d.store.Insert(j)
+	if err != nil {
 		return ipc.Response{OK: false, Error: err.Error()}
+	}
+	// The default checkpoint dir is <CheckpointBaseDir>/<id>, but id isn't
+	// known until Insert assigns it -- a required follow-up, not optional.
+	if req.Job.CheckpointDir == "" {
+		dir := filepath.Join(d.checkpointBaseDir, id)
+		if err := d.store.UpdateCheckpointDir(id, dir); err != nil {
+			log.Printf("register: job %s: failed to set default checkpoint dir: %v", id, err)
+		}
 	}
 	return ipc.Response{OK: true, JobID: id}
 }

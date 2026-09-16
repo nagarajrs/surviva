@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -80,7 +81,9 @@ func ValidTransition(from, to Status) bool {
 	return false
 }
 
-// Job is a single unit of work surviva is tracking.
+// Job is a single unit of work surviva is tracking. ID is a sequential
+// integer, formatted as a string (Slurm-style: "1", "2", "3", ...) --
+// assigned by Insert, not the caller.
 type Job struct {
 	ID             string
 	PID            int
@@ -98,7 +101,7 @@ type Job struct {
 
 const schema = `
 CREATE TABLE IF NOT EXISTS jobs (
-	id              TEXT PRIMARY KEY,
+	id              INTEGER PRIMARY KEY AUTOINCREMENT,
 	pid             INTEGER NOT NULL,
 	pgid            INTEGER NOT NULL,
 	checkpoint_dir  TEXT NOT NULL,
@@ -140,28 +143,37 @@ func (s *Store) Close() error {
 	return s.db.Close()
 }
 
-// Insert adds a new job row.
-func (s *Store) Insert(j Job) error {
+// Insert adds a new job row, ignoring any j.ID the caller set, and returns
+// the sequential id the database assigned it.
+func (s *Store) Insert(j Job) (string, error) {
 	cmdJSON, err := json.Marshal(j.Command)
 	if err != nil {
-		return fmt.Errorf("marshal command: %w", err)
+		return "", fmt.Errorf("marshal command: %w", err)
 	}
-	_, err = s.db.Exec(
-		`INSERT INTO jobs (id, pid, pgid, checkpoint_dir, command, work_dir, hook_checkpoint, hook_resume, status, failure_reason, registered_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		j.ID, j.PID, j.PGID, j.CheckpointDir, string(cmdJSON), j.WorkDir, j.HookCheckpoint, j.HookResume, string(j.Status), j.FailureReason, j.RegisteredAt, j.UpdatedAt,
+	res, err := s.db.Exec(
+		`INSERT INTO jobs (pid, pgid, checkpoint_dir, command, work_dir, hook_checkpoint, hook_resume, status, failure_reason, registered_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		j.PID, j.PGID, j.CheckpointDir, string(cmdJSON), j.WorkDir, j.HookCheckpoint, j.HookResume, string(j.Status), j.FailureReason, j.RegisteredAt, j.UpdatedAt,
 	)
 	if err != nil {
-		return fmt.Errorf("insert job %s: %w", j.ID, err)
+		return "", fmt.Errorf("insert job: %w", err)
 	}
-	return nil
+	id, err := res.LastInsertId()
+	if err != nil {
+		return "", fmt.Errorf("get inserted job id: %w", err)
+	}
+	return strconv.FormatInt(id, 10), nil
 }
 
 // Get fetches a single job by id, regardless of status. Backs `surviva show`.
 func (s *Store) Get(id string) (Job, error) {
+	idInt, err := parseID(id)
+	if err != nil {
+		return Job{}, err
+	}
 	row := s.db.QueryRow(
 		`SELECT id, pid, pgid, checkpoint_dir, command, work_dir, hook_checkpoint, hook_resume, status, failure_reason, registered_at, updated_at
-		 FROM jobs WHERE id = ?`, id,
+		 FROM jobs WHERE id = ?`, idInt,
 	)
 	return scanJob(row)
 }
@@ -218,6 +230,10 @@ func (s *Store) ListTerminal() ([]Job, error) {
 // refreshing updated_at. failureReason is stored as-is (pass "" if not
 // applicable to the target status).
 func (s *Store) UpdateStatus(id string, to Status, failureReason string) error {
+	idInt, err := parseID(id)
+	if err != nil {
+		return err
+	}
 	existing, err := s.Get(id)
 	if err != nil {
 		return err
@@ -227,7 +243,7 @@ func (s *Store) UpdateStatus(id string, to Status, failureReason string) error {
 	}
 	res, err := s.db.Exec(
 		`UPDATE jobs SET status = ?, failure_reason = ?, updated_at = ? WHERE id = ?`,
-		string(to), failureReason, time.Now().UTC(), id,
+		string(to), failureReason, time.Now().UTC(), idInt,
 	)
 	if err != nil {
 		return fmt.Errorf("update job %s: %w", id, err)
@@ -241,6 +257,10 @@ func (s *Store) UpdateStatus(id string, to Status, failureReason string) error {
 // UpdatePID rewrites a job's pid/pgid and moves it to RUNNING -- used when a
 // resume brings the same job id back to life under a new process.
 func (s *Store) UpdatePID(id string, pid, pgid int) error {
+	idInt, err := parseID(id)
+	if err != nil {
+		return err
+	}
 	existing, err := s.Get(id)
 	if err != nil {
 		return err
@@ -250,7 +270,7 @@ func (s *Store) UpdatePID(id string, pid, pgid int) error {
 	}
 	res, err := s.db.Exec(
 		`UPDATE jobs SET pid = ?, pgid = ?, status = ?, updated_at = ? WHERE id = ?`,
-		pid, pgid, string(StatusRunning), time.Now().UTC(), id,
+		pid, pgid, string(StatusRunning), time.Now().UTC(), idInt,
 	)
 	if err != nil {
 		return fmt.Errorf("update job %s: %w", id, err)
@@ -261,6 +281,37 @@ func (s *Store) UpdatePID(id string, pid, pgid int) error {
 	return nil
 }
 
+// UpdateCheckpointDir sets a job's checkpoint directory. Used once at
+// registration time to fill in the default path (<CheckpointBaseDir>/<id>),
+// which can't be known until Insert has assigned the id.
+func (s *Store) UpdateCheckpointDir(id, dir string) error {
+	idInt, err := parseID(id)
+	if err != nil {
+		return err
+	}
+	res, err := s.db.Exec(
+		`UPDATE jobs SET checkpoint_dir = ?, updated_at = ? WHERE id = ?`,
+		dir, time.Now().UTC(), idInt,
+	)
+	if err != nil {
+		return fmt.Errorf("update job %s: %w", id, err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("job %s not found", id)
+	}
+	return nil
+}
+
+// parseID converts a job id string (as typed on the command line or sent
+// over ipc) into the integer the jobs table actually keys on.
+func parseID(id string) (int64, error) {
+	n, err := strconv.ParseInt(id, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("invalid job id %q", id)
+	}
+	return n, nil
+}
+
 // rowScanner is satisfied by both *sql.Row and *sql.Rows.
 type rowScanner interface {
 	Scan(dest ...any) error
@@ -269,12 +320,14 @@ type rowScanner interface {
 func scanJob(row rowScanner) (Job, error) {
 	var (
 		j       Job
+		id      int64
 		cmdJSON string
 		status  string
 	)
-	if err := row.Scan(&j.ID, &j.PID, &j.PGID, &j.CheckpointDir, &cmdJSON, &j.WorkDir, &j.HookCheckpoint, &j.HookResume, &status, &j.FailureReason, &j.RegisteredAt, &j.UpdatedAt); err != nil {
+	if err := row.Scan(&id, &j.PID, &j.PGID, &j.CheckpointDir, &cmdJSON, &j.WorkDir, &j.HookCheckpoint, &j.HookResume, &status, &j.FailureReason, &j.RegisteredAt, &j.UpdatedAt); err != nil {
 		return Job{}, fmt.Errorf("scan job row: %w", err)
 	}
+	j.ID = strconv.FormatInt(id, 10)
 	if err := json.Unmarshal([]byte(cmdJSON), &j.Command); err != nil {
 		return Job{}, fmt.Errorf("unmarshal command: %w", err)
 	}

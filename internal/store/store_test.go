@@ -29,13 +29,12 @@ func openTestStore(t *testing.T) *Store {
 	return s
 }
 
-func newJob(id string) Job {
+func newJob() Job {
 	now := time.Now().UTC()
 	return Job{
-		ID:            id,
 		PID:           1234,
 		PGID:          1234,
-		CheckpointDir: "/var/lib/surviva/checkpoints/" + id,
+		CheckpointDir: "/var/lib/surviva/checkpoints/pending",
 		Command:       []string{"sleep", "300"},
 		WorkDir:       "/tmp",
 		Status:        StatusRunning,
@@ -44,23 +43,49 @@ func newJob(id string) Job {
 	}
 }
 
+func insertJob(t *testing.T, s *Store, j Job) string {
+	t.Helper()
+	id, err := s.Insert(j)
+	if err != nil {
+		t.Fatalf("Insert: %v", err)
+	}
+	return id
+}
+
+func TestInsertAssignsSequentialIDs(t *testing.T) {
+	s := openTestStore(t)
+	first := insertJob(t, s, newJob())
+	second := insertJob(t, s, newJob())
+	third := insertJob(t, s, newJob())
+
+	// Slurm-style: plain increasing integers, not UUIDs.
+	if first != "1" || second != "2" || third != "3" {
+		t.Errorf("got ids %q, %q, %q, want \"1\", \"2\", \"3\"", first, second, third)
+	}
+}
+
 func TestInsertGetRoundTrip(t *testing.T) {
 	s := openTestStore(t)
-	j := newJob("job-1")
+	j := newJob()
 	j.HookCheckpoint = "/opt/ckpt.sh"
 	j.HookResume = "/opt/resume.sh"
 
-	if err := s.Insert(j); err != nil {
-		t.Fatalf("Insert: %v", err)
-	}
-	got, err := s.Get("job-1")
+	id := insertJob(t, s, j)
+	got, err := s.Get(id)
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	if got.ID != j.ID || got.PID != j.PID || got.PGID != j.PGID || got.CheckpointDir != j.CheckpointDir ||
+	if got.ID != id || got.PID != j.PID || got.PGID != j.PGID || got.CheckpointDir != j.CheckpointDir ||
 		got.WorkDir != j.WorkDir || got.HookCheckpoint != j.HookCheckpoint || got.HookResume != j.HookResume ||
 		got.Status != j.Status || len(got.Command) != 2 || got.Command[0] != "sleep" || got.Command[1] != "300" {
-		t.Fatalf("round-trip mismatch: got %+v, want %+v", got, j)
+		t.Fatalf("round-trip mismatch: got %+v, want %+v (id %s)", got, j, id)
+	}
+}
+
+func TestGetRejectsNonNumericID(t *testing.T) {
+	s := openTestStore(t)
+	if _, err := s.Get("not-a-number"); err == nil {
+		t.Fatal("expected Get to reject a non-numeric job id")
 	}
 }
 
@@ -73,12 +98,17 @@ func TestListExcludesTerminalIncludesActive(t *testing.T) {
 	}
 	terminal := []Status{StatusFailed, StatusCanceled, StatusCompleted}
 
-	for _, st := range append(append([]Status{}, active...), terminal...) {
-		j := newJob("job-" + string(st))
+	activeIDs := map[string]bool{}
+	for _, st := range active {
+		j := newJob()
 		j.Status = st
-		if err := s.Insert(j); err != nil {
-			t.Fatalf("Insert(%s): %v", st, err)
-		}
+		activeIDs[insertJob(t, s, j)] = true
+	}
+	terminalIDs := map[string]bool{}
+	for _, st := range terminal {
+		j := newJob()
+		j.Status = st
+		terminalIDs[insertJob(t, s, j)] = true
 	}
 
 	got, err := s.List()
@@ -89,14 +119,14 @@ func TestListExcludesTerminalIncludesActive(t *testing.T) {
 	for _, j := range got {
 		gotIDs[j.ID] = true
 	}
-	for _, st := range active {
-		if !gotIDs["job-"+string(st)] {
-			t.Errorf("List() missing active job with status %s", st)
+	for id := range activeIDs {
+		if !gotIDs[id] {
+			t.Errorf("List() missing active job %s", id)
 		}
 	}
-	for _, st := range terminal {
-		if gotIDs["job-"+string(st)] {
-			t.Errorf("List() included terminal job with status %s", st)
+	for id := range terminalIDs {
+		if gotIDs[id] {
+			t.Errorf("List() included terminal job %s", id)
 		}
 	}
 
@@ -109,21 +139,21 @@ func TestListExcludesTerminalIncludesActive(t *testing.T) {
 	for _, j := range gotTerminal {
 		gotTerminalIDs[j.ID] = true
 	}
-	for _, st := range terminal {
-		if !gotTerminalIDs["job-"+string(st)] {
-			t.Errorf("ListTerminal() missing terminal job with status %s", st)
+	for id := range terminalIDs {
+		if !gotTerminalIDs[id] {
+			t.Errorf("ListTerminal() missing terminal job %s", id)
 		}
 	}
-	for _, st := range active {
-		if gotTerminalIDs["job-"+string(st)] {
-			t.Errorf("ListTerminal() included active job with status %s", st)
+	for id := range activeIDs {
+		if gotTerminalIDs[id] {
+			t.Errorf("ListTerminal() included active job %s", id)
 		}
 	}
 
 	// Every terminal job must still be reachable via Get.
-	for _, st := range terminal {
-		if _, err := s.Get("job-" + string(st)); err != nil {
-			t.Errorf("Get(job-%s) after terminal: %v", st, err)
+	for id := range terminalIDs {
+		if _, err := s.Get(id); err != nil {
+			t.Errorf("Get(%s) after terminal: %v", id, err)
 		}
 	}
 }
@@ -167,27 +197,23 @@ func TestValidTransitions(t *testing.T) {
 
 func TestUpdateStatusRejectsInvalidTransition(t *testing.T) {
 	s := openTestStore(t)
-	j := newJob("job-1")
+	j := newJob()
 	j.Status = StatusCompleted
-	if err := s.Insert(j); err != nil {
-		t.Fatalf("Insert: %v", err)
-	}
-	if err := s.UpdateStatus("job-1", StatusRunning, ""); err == nil {
+	id := insertJob(t, s, j)
+	if err := s.UpdateStatus(id, StatusRunning, ""); err == nil {
 		t.Fatal("expected UpdateStatus to reject COMPLETED -> RUNNING")
 	}
 }
 
 func TestUpdateStatusSetsFailureReason(t *testing.T) {
 	s := openTestStore(t)
-	j := newJob("job-1")
+	j := newJob()
 	j.Status = StatusCheckpointInProgress
-	if err := s.Insert(j); err != nil {
-		t.Fatalf("Insert: %v", err)
-	}
-	if err := s.UpdateStatus("job-1", StatusCheckpointCreationFailed, "criu dump: disk full"); err != nil {
+	id := insertJob(t, s, j)
+	if err := s.UpdateStatus(id, StatusCheckpointCreationFailed, "criu dump: disk full"); err != nil {
 		t.Fatalf("UpdateStatus: %v", err)
 	}
-	got, err := s.Get("job-1")
+	got, err := s.Get(id)
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
@@ -201,16 +227,14 @@ func TestUpdateStatusSetsFailureReason(t *testing.T) {
 
 func TestUpdatePIDResumesToRunning(t *testing.T) {
 	s := openTestStore(t)
-	j := newJob("job-1")
+	j := newJob()
 	j.Status = StatusRestorePending
 	j.PID, j.PGID = 111, 111
-	if err := s.Insert(j); err != nil {
-		t.Fatalf("Insert: %v", err)
-	}
-	if err := s.UpdatePID("job-1", 999, 999); err != nil {
+	id := insertJob(t, s, j)
+	if err := s.UpdatePID(id, 999, 999); err != nil {
 		t.Fatalf("UpdatePID: %v", err)
 	}
-	got, err := s.Get("job-1")
+	got, err := s.Get(id)
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
@@ -219,5 +243,22 @@ func TestUpdatePIDResumesToRunning(t *testing.T) {
 	}
 	if got.PID != 999 || got.PGID != 999 {
 		t.Errorf("pid/pgid = %d/%d, want 999/999", got.PID, got.PGID)
+	}
+}
+
+func TestUpdateCheckpointDir(t *testing.T) {
+	s := openTestStore(t)
+	id := insertJob(t, s, newJob())
+
+	dir := "/var/lib/surviva/checkpoints/" + id
+	if err := s.UpdateCheckpointDir(id, dir); err != nil {
+		t.Fatalf("UpdateCheckpointDir: %v", err)
+	}
+	got, err := s.Get(id)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.CheckpointDir != dir {
+		t.Errorf("CheckpointDir = %q, want %q", got.CheckpointDir, dir)
 	}
 }

@@ -13,8 +13,10 @@ new modules rather than rewritten from scratch:
 
 - `internal/criu`, `internal/checkpoint`, `internal/resume` — CRIU dump/
   restore wrapping, reused as-is (or near enough) in the new `daemon` module
-- `internal/procsignal`, `internal/idgen` — process-group signaling and job
-  ID generation, reused as-is in `daemon`
+- `internal/procsignal` — process-group signaling, reused as-is in `daemon`
+  (`internal/idgen`, job-id generation, was reused briefly but then dropped
+  entirely: the new `store` assigns Slurm-style sequential integer ids via
+  SQLite `AUTOINCREMENT` instead of random ones — see `SPEC-store.md`)
 - `internal/imds` — AWS Spot signal polling, wrapped behind the new
   `daemon`'s pluggable cloud-provider interface
 - `internal/procattr`, `internal/fdguard` — CRIU session/fd hygiene needed
