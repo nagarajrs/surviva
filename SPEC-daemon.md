@@ -133,11 +133,27 @@ the request):
    `filepath.Join(cfg.CheckpointBaseDir, id)`.
 4. `store.Insert(Job{..., Status: RUNNING})`.
 
+**Prune** (backs a future `surviva prune [job-id]` — clears checkpoint
+*files* off disk, never touches `store` rows; a pruned job stays fully
+visible via `show`, per `store`'s "no automatic pruning of history" stance):
+- With a `JobID`: `store.Get(id)`; if its status isn't `FAILED`/`CANCELED`/
+  `COMPLETED`, reject ("job <id> is not terminal, refusing to prune"— an
+  active job's checkpoint is still needed); else `os.RemoveAll(job.CheckpointDir)`.
+- Without a `JobID`: `store.ListTerminal()`, `os.RemoveAll` each job's
+  `CheckpointDir`, collecting per-job errors rather than aborting on the
+  first failure. Response reports how many were pruned and lists any that
+  failed (e.g. permission error), it doesn't fail the whole request for one
+  bad one.
+- Idempotent by construction: `os.RemoveAll` on an already-gone directory is
+  a no-op, not an error, so running `prune` twice (or pruning a job whose
+  checkpoint was already cleaned by hand) is harmless — no new `store` field
+  needed to track "already pruned."
+
 `daemon` does **not** write its own audit-log entry for "a Register/Pause/
-Resume/Cancel/Show/List request arrived" — that's `surviva-cli`'s job to log
-about itself (`component: "cli"`). `daemon` only logs its own internal
-activity (interruption detection, checkpoint/restore attempts), avoiding the
-same event being logged twice from both sides.
+Resume/Cancel/Show/List/Prune request arrived" — that's `surviva-cli`'s job
+to log about itself (`component: "cli"`). `daemon` only logs its own
+internal activity (interruption detection, checkpoint/restore attempts),
+avoiding the same event being logged twice from both sides.
 
 ## Interruption fan-out
 
@@ -162,6 +178,7 @@ const (
     ActionResume   Action = "resume"
     ActionCancel   Action = "cancel"
     ActionComplete Action = "complete"
+    ActionPrune    Action = "prune"
 )
 
 type RegisterJob struct {
@@ -177,18 +194,19 @@ type RegisterJob struct {
 type Request struct {
     Action   Action
     Job      *RegisterJob // Register
-    JobID    string       // Show/Pause/Resume/Cancel/Complete
+    JobID    string       // Show/Pause/Resume/Cancel/Complete/Prune (Prune: empty means "all terminal jobs")
     ExitCode int          // Complete
-    ErrMsg   string        // Complete, optional
+    ErrMsg   string       // Complete, optional
 }
 
 type Response struct {
-    OK      bool
-    Error   string
-    JobID   string
-    Job     *store.Job  // Show
-    Jobs    []store.Job // List
-    Message string       // e.g. "resumed as pid 4821"
+    OK       bool
+    Error    string
+    JobID    string
+    Job      *store.Job  // Show
+    Jobs     []store.Job // List
+    Message  string      // e.g. "resumed as pid 4821", "pruned 3 job(s)"
+    Failures []string    // Prune only: "<job-id>: <error>" for any that failed to clean up
 }
 ```
 
@@ -214,16 +232,25 @@ philosophy — real infra over mocks); that part is manual/integration, not
 - A fake `Provider` firing `onSignal` triggers the interruption fan-out over
   every `RUNNING` job and nothing else (verify via `store` status changes),
   bounded by `MaxConcurrentCheckpoints`.
+- `Prune` with a `JobID` on a terminal job removes its `CheckpointDir` and
+  succeeds; on a `RUNNING`/`CHECKPOINT_IN_PROGRESS`/etc. job, it's rejected
+  and the directory is untouched. `Prune` with no `JobID` removes every
+  terminal job's directory, leaves every active job's directory alone, and
+  running it a second time in a row is a harmless no-op (nothing left to
+  remove, no error).
 
 ## Boundaries
 
 - **Always:** every `store` write goes through the status-transition rules
-  it already enforces; refuse new `Register` once interrupted.
+  it already enforces; refuse new `Register` once interrupted; `Prune`
+  never touches a `store` row, only files on disk.
 - **Ask first:** adding another config directive beyond
-  `MaxConcurrentCheckpoints`; building S3/EBS/DynamoDB support here.
+  `MaxConcurrentCheckpoints`; building S3/EBS/DynamoDB support here;
+  auto-pruning on a schedule (`Prune` is explicitly operator-triggered only,
+  per the decision below — no cron-like behavior inside `daemon` itself).
 - **Never:** let one slow client connection block another (per-connection
-  goroutines, not a single serialized loop); delete checkpoint files
-  automatically on any status transition (see Open Questions).
+  goroutines, not a single serialized loop); delete checkpoint files on
+  `Cancel` or any other status transition — only `Prune` ever deletes files.
 
 ## Success Criteria
 
@@ -234,16 +261,19 @@ philosophy — real infra over mocks); that part is manual/integration, not
   sequence, checkpoint images land at the job's `CheckpointDir`.
 - A fake interruption signal checkpoints every `RUNNING` job and refuses
   further registrations, mirroring `legacy`'s proven behavior.
+- `Prune` clears every terminal job's checkpoint files and nothing else,
+  and every pruned job is still fully visible via `Show`.
+
+## Resolved
+
+1. ~~Checkpoint-directory cleanup on `Cancel`.~~ **Decided: `Cancel` never
+   deletes files.** Cleanup is a separate, explicit, operator-triggered
+   `Prune` operation instead (see above) — `surviva prune [job-id]` clears
+   checkpoint files for terminal jobs, one or all of them, on demand. No
+   automatic/scheduled pruning inside `daemon` itself (not asked for; add
+   later if wanted).
+2. ~~`Complete` as the action name.~~ **Confirmed: `Complete`.**
 
 ## Open Questions
 
-1. **Checkpoint-directory cleanup on `Cancel`.** Right now cancelling a
-   `CHECKPOINT_CREATED`/`CHECKPOINT_CREATION_FAILED`/`RESTORE_FAILED` job
-   leaves its checkpoint images on disk forever (matches `store`'s own "no
-   automatic pruning" stance). Say now if cancel should also delete
-   `job.CheckpointDir`'s contents, or if that's better left to an explicit
-   future cleanup command/tool.
-2. **`Complete` as the action name.** Chose it over reusing `legacy`'s
-   "Deregister" since it now carries an exit code and produces two
-   different terminal statuses, not a single unconditional untrack. Purely
-   a naming call — say so if you'd rather keep `Deregister`.
+None remaining.

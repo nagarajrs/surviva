@@ -99,9 +99,17 @@ func (s *Store) Close() error
 func (s *Store) Insert(j Job) error
 func (s *Store) Get(id string) (Job, error)                          // any status — backs `show`
 func (s *Store) List() ([]Job, error)                                 // active only — backs `list`
+func (s *Store) ListTerminal() ([]Job, error)                         // FAILED/CANCELED/COMPLETED only — backs `prune`
 func (s *Store) UpdateStatus(id string, to Status, failureReason string) error
 func (s *Store) UpdatePID(id string, pid, pgid int) error             // resume reusing the same job ID
 ```
+
+`ListTerminal()` is `List()`'s mirror image — `WHERE status IN
+('FAILED','CANCELED','COMPLETED')` — added for the future `surviva prune`
+command (see `SPEC-daemon.md`): it needs to find every terminal job's
+`CheckpointDir` to delete, without touching the DB rows themselves (`prune`
+clears checkpoint *files*, not job history — a pruned job stays fully
+visible via `show`).
 
 `List()` is `legacy`'s `List()` with one added clause: `WHERE status NOT IN
 ('FAILED','CANCELED','COMPLETED')`. `Get()` is unchanged from legacy — it
@@ -116,6 +124,8 @@ temp-file DB (matches legacy's approach — no new test infra needed):
 - `List()` excludes each terminal status, includes each active one
   (`CHECKPOINT_CREATION_FAILED` and `RESTORE_FAILED` included, per the
   "active" default below).
+- `ListTerminal()` returns exactly the inverse set: only
+  `FAILED`/`CANCELED`/`COMPLETED`, none of the active statuses.
 - Every edge in the transition table above succeeds; a handful of invalid
   ones (e.g. `COMPLETED → RUNNING`, `CANCELED → CHECKPOINT_CREATED`) are
   rejected.
