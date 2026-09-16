@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/go-sql-driver/mysql"
 	_ "modernc.org/sqlite"
 )
 
@@ -99,7 +100,7 @@ type Job struct {
 	UpdatedAt      time.Time
 }
 
-const schema = `
+const sqliteSchema = `
 CREATE TABLE IF NOT EXISTS jobs (
 	id              INTEGER PRIMARY KEY AUTOINCREMENT,
 	pid             INTEGER NOT NULL,
@@ -116,22 +117,90 @@ CREATE TABLE IF NOT EXISTS jobs (
 );
 `
 
-// Store wraps a SQLite-backed jobs table.
+// mysqlSchema differs from sqliteSchema only where MySQL's dialect forces
+// it to: AUTO_INCREMENT instead of AUTOINCREMENT, status bounded to
+// VARCHAR (always one of the nine known status strings, never unbounded),
+// and no DEFAULT ” on the TEXT columns -- older MySQL/MariaDB reject a
+// default on TEXT/BLOB, and it's redundant anyway since Insert always
+// supplies an explicit value for every column.
+const mysqlSchema = `
+CREATE TABLE IF NOT EXISTS jobs (
+	id              BIGINT PRIMARY KEY AUTO_INCREMENT,
+	pid             INTEGER NOT NULL,
+	pgid            INTEGER NOT NULL,
+	checkpoint_dir  TEXT NOT NULL,
+	command         TEXT NOT NULL,
+	work_dir        TEXT NOT NULL,
+	hook_checkpoint TEXT NOT NULL,
+	hook_resume     TEXT NOT NULL,
+	status          VARCHAR(64) NOT NULL,
+	failure_reason  TEXT NOT NULL,
+	registered_at   DATETIME NOT NULL,
+	updated_at      DATETIME NOT NULL
+);
+`
+
+// Store wraps a SQLite- or MySQL-backed jobs table (see Options).
 type Store struct {
 	db *sql.DB
 }
 
-// Open creates (if needed) and opens the jobs database at path.
-func Open(path string) (*Store, error) {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return nil, fmt.Errorf("create db dir: %w", err)
+// Options selects and configures the job-table backend. The zero value
+// (empty Driver) means "sqlite" -- Path is then required; the mysql fields
+// are required instead when Driver is "mysql". See SPEC-store.md.
+type Options struct {
+	Driver string // "sqlite" (default if empty) or "mysql"
+
+	Path string // sqlite
+
+	Host     string // mysql
+	Port     int    // mysql
+	User     string // mysql
+	Password string // mysql, may be empty
+	DBName   string // mysql
+}
+
+// Open creates (if needed) and opens the jobs database described by opts.
+func Open(opts Options) (*Store, error) {
+	driver := opts.Driver
+	if driver == "" {
+		driver = "sqlite"
 	}
-	db, err := sql.Open("sqlite", path)
+
+	var dsn, ddl string
+	switch driver {
+	case "sqlite":
+		if err := os.MkdirAll(filepath.Dir(opts.Path), 0o755); err != nil {
+			return nil, fmt.Errorf("create db dir: %w", err)
+		}
+		dsn = opts.Path
+		ddl = sqliteSchema
+	case "mysql":
+		cfg := mysql.NewConfig()
+		cfg.User = opts.User
+		cfg.Passwd = opts.Password
+		cfg.Net = "tcp"
+		cfg.Addr = fmt.Sprintf("%s:%d", opts.Host, opts.Port)
+		cfg.DBName = opts.DBName
+		cfg.ParseTime = true // RegisteredAt/UpdatedAt scan straight into time.Time, like sqlite already does
+		dsn = cfg.FormatDSN()
+		ddl = mysqlSchema
+	default:
+		return nil, fmt.Errorf("unsupported db driver %q (must be sqlite or mysql)", driver)
+	}
+
+	db, err := sql.Open(driver, dsn)
 	if err != nil {
-		return nil, fmt.Errorf("open sqlite db %s: %w", path, err)
+		return nil, fmt.Errorf("open %s db: %w", driver, err)
 	}
-	db.SetMaxOpenConns(1) // modernc.org/sqlite: avoid concurrent-writer lock errors
-	if _, err := db.Exec(schema); err != nil {
+	if driver == "sqlite" {
+		db.SetMaxOpenConns(1) // modernc.org/sqlite: avoid concurrent-writer lock errors -- not a MySQL concern
+	}
+	if err := db.Ping(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("connect to %s db: %w", driver, err)
+	}
+	if _, err := db.Exec(ddl); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("apply schema: %w", err)
 	}

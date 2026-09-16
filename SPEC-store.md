@@ -11,8 +11,14 @@ capability map); `surviva-cli` only ever reads through `daemon`, never opens
 the database directly.
 
 This is almost entirely a trim of `legacy/internal/store` +
-`legacy/internal/job`, which already do the "SQLite-backed job table with a
+`legacy/internal/job`, which already do the "SQL-backed job table with a
 status enum" job correctly — see Boundaries for exactly what changes.
+
+SQLite (`modernc.org/sqlite`, pure Go, no cgo — legacy's ADR-13) is the
+default and the only backend most deployments will ever need. MySQL is also
+supported, for the same reason Slurm's `slurmdbd.conf` lets an admin point
+accounting storage at an external database instead of a local file — see
+"Pluggable backend" below.
 
 ## Data Model
 
@@ -101,10 +107,56 @@ RESTORE_FAILED ──cancel────────> CANCELED
 invalid transition is a caller bug, not a recoverable runtime condition, so
 `UpdateStatus` returns an error rather than silently applying it.
 
+## Pluggable backend (SQLite default, MySQL optional)
+
+```go
+type Options struct {
+    Driver string // "sqlite" (default if empty) or "mysql"
+
+    Path string // sqlite
+
+    Host     string // mysql
+    Port     int    // mysql
+    User     string // mysql
+    Password string // mysql, may be empty
+    DBName   string // mysql
+}
+
+func Open(opts Options) (*Store, error)
+```
+
+`daemon` builds `Options` from `config.Config`'s `DBType`/`DBPath`/`DBHost`/
+`DBPort`/`DBUser`/`DBPassword`/`DBName` (see `SPEC-config.md`) — `store`
+itself still has no dependency on `config`, it just takes a plain struct.
+
+MySQL was chosen over Postgres or a generic driver because it's the
+lowest-friction option, not just because it matches Slurm's own real-world
+choice: `github.com/go-sql-driver/mysql` uses the same `?` placeholders and
+`Result.LastInsertId()` support SQLite already relies on, so every existing
+query in this package (`Insert`/`Get`/`List`/`ListTerminal`/`UpdateStatus`/
+`UpdatePID`/`UpdateCheckpointDir`) is completely unchanged — only `Open`'s
+DSN construction and the `CREATE TABLE` DDL differ per driver:
+- `id INTEGER PRIMARY KEY AUTOINCREMENT` (sqlite) vs.
+  `id BIGINT PRIMARY KEY AUTO_INCREMENT` (mysql).
+- `status` is `VARCHAR(64)` in the MySQL DDL instead of `TEXT` (it's always
+  one of the nine known status strings), and no `DEFAULT ''` on the MySQL
+  `TEXT` columns (older MySQL/MariaDB reject a default on `TEXT`/`BLOB`,
+  and it's redundant — `Insert` always supplies an explicit value for every
+  column, defaulted to `""` by Go's own zero value when unset).
+- The MySQL DSN is built via the driver's own `mysql.Config{...}.FormatDSN()`
+  (with `ParseTime: true`, so `RegisteredAt`/`UpdatedAt` scan straight into
+  `time.Time` like they already do for SQLite) — never manual string
+  concatenation, which breaks on a password containing `@`/`:`/`/`.
+- `db.SetMaxOpenConns(1)` stays SQLite-only (`modernc.org/sqlite`'s own
+  concurrent-writer limitation) — MySQL is built for real concurrent access
+  and gets no such cap.
+- `Open` calls `db.Ping()` for both drivers before applying the schema, so a
+  bad MySQL host/credentials/network fails loudly at daemon startup, not on
+  the first query later.
+
 ## API
 
 ```go
-func Open(path string) (*Store, error) // creates path's parent directory if missing
 func (s *Store) Close() error
 
 func (s *Store) Insert(j Job) (string, error)                         // ignores j.ID, returns the assigned sequential id
@@ -152,13 +204,25 @@ temp-file DB (matches legacy's approach — no new test infra needed):
   rejected.
 - `UpdatePID` on a `RESTORE_PENDING` job resuming to `RUNNING` — new pid
   readable back via `Get`.
+- `Open` with an unrecognized `Options.Driver` fails immediately, before
+  attempting any connection; `Options{}` (empty `Driver`) behaves exactly
+  like an explicit `"sqlite"`.
+
+No real MySQL server is available for `go test` in this environment (the
+project already accepts this constraint for CRIU/AWS — real-infra testing
+happens manually). The MySQL DDL/DSN path is verified by hand against a
+real MySQL instance instead — see `SPEC-config.md`'s testing note and the
+project's own WSL2-based manual verification practice.
 
 ## Boundaries
 
 - **Always:** validate every status transition against the table above;
   never let `List()` and `Get()` diverge from the active/any-status split.
 - **Ask first:** changing the status vocabulary itself (adding/renaming a
-  status) — that's a contract change every other module reads.
+  status) — that's a contract change every other module reads; adding a
+  third database backend beyond sqlite/mysql (confirmed scope with the
+  user — Postgres and a generic-driver escape hatch were both explicitly
+  deferred, not just unconsidered).
 - **Never:** let anything outside `daemon` write to this store (no exported
   constructor for a second writer); no automatic pruning of terminal jobs —
   they stay in the DB forever unless someone explicitly asks for retention

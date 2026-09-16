@@ -17,11 +17,20 @@ type Config struct {
 	PollInterval      time.Duration
 	AuditLogPath      string
 	CheckpointBaseDir string
-	DBPath            string
 	// MaxConcurrentCheckpoints bounds how many jobs are checkpointed at once
 	// during an interruption fan-out. Optional; 0 means "let daemon default
 	// it" (runtime.NumCPU() -- see SPEC-daemon.md).
 	MaxConcurrentCheckpoints int
+
+	// DBType selects the job-table backend: "sqlite" (default) or "mysql".
+	// See SPEC-store.md for what each field below is used for.
+	DBType     string
+	DBPath     string // sqlite
+	DBHost     string // mysql
+	DBPort     int    // mysql
+	DBUser     string // mysql
+	DBPassword string // mysql, optional (empty allowed)
+	DBName     string // mysql
 }
 
 // supportedCloudProviders are recognized directive values for CloudProvider.
@@ -89,6 +98,18 @@ var knownKeys = map[string]bool{
 	"CHECKPOINTBASEDIR":        true,
 	"DBPATH":                   true,
 	"MAXCONCURRENTCHECKPOINTS": true,
+	"DBTYPE":                   true,
+	"DBHOST":                   true,
+	"DBPORT":                   true,
+	"DBUSER":                   true,
+	"DBPASSWORD":               true,
+	"DBNAME":                   true,
+}
+
+// supportedDBTypes are the recognized DBType directive values.
+var supportedDBTypes = map[string]bool{
+	"sqlite": true,
+	"mysql":  true,
 }
 
 func validate(path string, raw map[string]string) (Config, error) {
@@ -127,9 +148,44 @@ func validate(path string, raw map[string]string) (Config, error) {
 		return Config{}, fmt.Errorf("%s: missing required directive CheckpointBaseDir", path)
 	}
 
-	cfg.DBPath, ok = raw["DBPATH"]
-	if !ok {
-		return Config{}, fmt.Errorf("%s: missing required directive DBPath", path)
+	dbType := "sqlite"
+	if v, ok := raw["DBTYPE"]; ok {
+		dbType = strings.ToLower(v)
+	}
+	if !supportedDBTypes[dbType] {
+		return Config{}, fmt.Errorf("%s: DBType %q is not supported (must be sqlite or mysql)", path, dbType)
+	}
+	cfg.DBType = dbType
+
+	switch dbType {
+	case "sqlite":
+		cfg.DBPath, ok = raw["DBPATH"]
+		if !ok {
+			return Config{}, fmt.Errorf("%s: missing required directive DBPath (required when DBType=sqlite)", path)
+		}
+	case "mysql":
+		cfg.DBHost, ok = raw["DBHOST"]
+		if !ok {
+			return Config{}, fmt.Errorf("%s: missing required directive DBHost (required when DBType=mysql)", path)
+		}
+		portRaw, ok := raw["DBPORT"]
+		if !ok {
+			return Config{}, fmt.Errorf("%s: missing required directive DBPort (required when DBType=mysql)", path)
+		}
+		port, err := strconv.Atoi(portRaw)
+		if err != nil || port <= 0 {
+			return Config{}, fmt.Errorf("%s: DBPort must be a positive integer, got %q", path, portRaw)
+		}
+		cfg.DBPort = port
+		cfg.DBUser, ok = raw["DBUSER"]
+		if !ok {
+			return Config{}, fmt.Errorf("%s: missing required directive DBUser (required when DBType=mysql)", path)
+		}
+		cfg.DBPassword = raw["DBPASSWORD"] // optional -- empty allowed (e.g. passwordless local MySQL)
+		cfg.DBName, ok = raw["DBNAME"]
+		if !ok {
+			return Config{}, fmt.Errorf("%s: missing required directive DBName (required when DBType=mysql)", path)
+		}
 	}
 
 	if maxRaw, ok := raw["MAXCONCURRENTCHECKPOINTS"]; ok {

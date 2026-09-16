@@ -23,7 +23,7 @@ func (fakeProvider) Run(ctx context.Context, onSignal func(string)) { <-ctx.Done
 
 func newTestDaemon(t *testing.T) *Daemon {
 	t.Helper()
-	st, err := store.Open(filepath.Join(t.TempDir(), "jobs.db"))
+	st, err := store.Open(store.Options{Path: filepath.Join(t.TempDir(), "jobs.db")})
 	if err != nil {
 		t.Fatalf("store.Open: %v", err)
 	}

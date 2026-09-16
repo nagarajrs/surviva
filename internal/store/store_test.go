@@ -12,16 +12,33 @@ func TestOpenCreatesMissingParentDir(t *testing.T) {
 	// daemon's own wiring only ensures the socket's dir exists, not the
 	// store's.
 	path := filepath.Join(t.TempDir(), "nested", "does", "not", "exist", "jobs.db")
-	s, err := Open(path)
+	s, err := Open(Options{Path: path})
 	if err != nil {
 		t.Fatalf("Open with missing parent dirs: %v", err)
 	}
 	s.Close()
 }
 
+func TestOpenRejectsUnsupportedDriver(t *testing.T) {
+	_, err := Open(Options{Driver: "postgres", Host: "localhost"})
+	if err == nil {
+		t.Fatal("expected Open to reject an unsupported driver before attempting any connection")
+	}
+}
+
+func TestOpenDefaultsToSQLite(t *testing.T) {
+	// Driver left empty (the zero value) must behave exactly like an
+	// explicit "sqlite" -- this is what every existing caller relies on.
+	s, err := Open(Options{Path: filepath.Join(t.TempDir(), "jobs.db")})
+	if err != nil {
+		t.Fatalf("Open with empty Driver: %v", err)
+	}
+	s.Close()
+}
+
 func openTestStore(t *testing.T) *Store {
 	t.Helper()
-	s, err := Open(filepath.Join(t.TempDir(), "jobs.db"))
+	s, err := Open(Options{Path: filepath.Join(t.TempDir(), "jobs.db")})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}

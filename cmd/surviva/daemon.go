@@ -30,7 +30,15 @@ func daemonCmd(args []string) int {
 		return 1
 	}
 
-	st, err := store.Open(cfg.DBPath)
+	st, err := store.Open(store.Options{
+		Driver:   cfg.DBType,
+		Path:     cfg.DBPath,
+		Host:     cfg.DBHost,
+		Port:     cfg.DBPort,
+		User:     cfg.DBUser,
+		Password: cfg.DBPassword,
+		DBName:   cfg.DBName,
+	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "surviva daemon: %v\n", err)
 		return 1

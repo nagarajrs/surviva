@@ -39,10 +39,15 @@ DBPath=/var/lib/surviva/jobs.db
 | `PollIntervalSeconds` | positive int | yes | How often `daemon` checks the cloud provider's interruption endpoint. |
 | `AuditLogPath` | path | yes | Where `audit-log` writes. |
 | `CheckpointBaseDir` | path | yes | Base dir `daemon` computes each job's checkpoint dir under (`<base>/<job-id>`, same convention `legacy/internal/checkpoint.Dir` already used). |
-| `DBPath` | path | yes | SQLite file `store` opens. |
+| `DBType` | string, one of `sqlite` (default), `mysql` | no | Selects `store`'s backend — see `SPEC-store.md`. Absent means `sqlite`, so every `surviva.conf` written before this directive existed keeps working unchanged. |
+| `DBPath` | path | yes, when `DBType=sqlite` | SQLite file `store` opens. |
+| `DBHost`, `DBPort`, `DBUser`, `DBName` | string / positive int / string / string | yes, when `DBType=mysql` | MySQL connection parameters, mirroring `slurmdbd.conf`'s `StorageHost`/`StoragePort`/`StorageUser`/`StorageLoc` pattern. |
+| `DBPassword` | string | no (empty allowed even when `DBType=mysql`) | MySQL password — optional for a passwordless local/dev MySQL instance. |
 
-All five are required — no defaults silently filled in for a daemon-critical
-setting; missing any one is a load-time error naming which key is missing.
+The first four are always required — no defaults silently filled in for a
+daemon-critical setting. `DBPath` vs. the four MySQL fields is the one
+directive set whose requiredness depends on another directive
+(`DBType`) — everything else is unconditional.
 
 ## API
 
@@ -52,7 +57,15 @@ type Config struct {
     PollInterval      time.Duration
     AuditLogPath      string
     CheckpointBaseDir string
-    DBPath            string
+    MaxConcurrentCheckpoints int
+
+    DBType     string // "sqlite" (default) or "mysql"
+    DBPath     string // sqlite
+    DBHost     string // mysql
+    DBPort     int    // mysql
+    DBUser     string // mysql
+    DBPassword string // mysql, optional
+    DBName     string // mysql
 }
 
 func Load(path string) (Config, error)
@@ -82,6 +95,10 @@ the actual-file-read path):
   is trimmed.
 - `cloudprovider=aws` / `CLOUDPROVIDER=aws` / `CloudProvider=aws` all parse
   identically (case-insensitive key match); the value itself is untouched.
+- `DBType` absent defaults to `sqlite` (and `DBPath` is then required).
+- `DBType=mysql` requires `DBHost`/`DBPort`/`DBUser`/`DBName` individually
+  (each missing one is its own load error); `DBPassword` may be absent/empty.
+- `DBType=postgres` (or any other value) is rejected.
 
 ## Boundaries
 

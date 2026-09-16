@@ -36,6 +36,7 @@ func TestLoadValid(t *testing.T) {
 		PollInterval:      5 * time.Second,
 		AuditLogPath:      "/var/log/surviva/audit.log",
 		CheckpointBaseDir: "/var/lib/surviva/checkpoints",
+		DBType:            "sqlite",
 		DBPath:            "/var/lib/surviva/jobs.db",
 	}
 	if cfg != want {
@@ -121,6 +122,73 @@ func TestLoadOptionalMaxConcurrentCheckpoints(t *testing.T) {
 	// Invalid value rejected like any other required int would be.
 	if _, err := Load(writeConf(t, validConf+"\nMaxConcurrentCheckpoints=0\n")); err == nil {
 		t.Error("expected error for MaxConcurrentCheckpoints=0")
+	}
+}
+
+func TestLoadDBTypeDefaultsToSQLite(t *testing.T) {
+	cfg, err := Load(writeConf(t, validConf))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.DBType != "sqlite" {
+		t.Errorf("DBType = %q, want %q", cfg.DBType, "sqlite")
+	}
+}
+
+func TestLoadMySQL(t *testing.T) {
+	base := `
+CloudProvider=aws
+PollIntervalSeconds=5
+AuditLogPath=/x
+CheckpointBaseDir=/y
+DBType=mysql
+DBHost=db.example.com
+DBPort=3306
+DBUser=surviva
+DBName=surviva_jobs
+`
+	cfg, err := Load(writeConf(t, base))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.DBType != "mysql" || cfg.DBHost != "db.example.com" || cfg.DBPort != 3306 ||
+		cfg.DBUser != "surviva" || cfg.DBName != "surviva_jobs" || cfg.DBPassword != "" {
+		t.Fatalf("got %+v", cfg)
+	}
+	if cfg.DBPath != "" {
+		t.Errorf("DBPath = %q, want empty when DBType=mysql", cfg.DBPath)
+	}
+}
+
+func TestLoadMySQLMissingRequiredField(t *testing.T) {
+	cases := map[string]string{
+		"DBHost": "CloudProvider=aws\nPollIntervalSeconds=5\nAuditLogPath=/x\nCheckpointBaseDir=/y\nDBType=mysql\nDBPort=3306\nDBUser=u\nDBName=d\n",
+		"DBPort": "CloudProvider=aws\nPollIntervalSeconds=5\nAuditLogPath=/x\nCheckpointBaseDir=/y\nDBType=mysql\nDBHost=h\nDBUser=u\nDBName=d\n",
+		"DBUser": "CloudProvider=aws\nPollIntervalSeconds=5\nAuditLogPath=/x\nCheckpointBaseDir=/y\nDBType=mysql\nDBHost=h\nDBPort=3306\nDBName=d\n",
+		"DBName": "CloudProvider=aws\nPollIntervalSeconds=5\nAuditLogPath=/x\nCheckpointBaseDir=/y\nDBType=mysql\nDBHost=h\nDBPort=3306\nDBUser=u\n",
+	}
+	for missing, content := range cases {
+		if _, err := Load(writeConf(t, content)); err == nil {
+			t.Errorf("missing %s: expected error, got none", missing)
+		}
+	}
+}
+
+func TestLoadMySQLPasswordOptional(t *testing.T) {
+	content := "CloudProvider=aws\nPollIntervalSeconds=5\nAuditLogPath=/x\nCheckpointBaseDir=/y\nDBType=mysql\nDBHost=h\nDBPort=3306\nDBUser=u\nDBName=d\n"
+	cfg, err := Load(writeConf(t, content))
+	if err != nil {
+		t.Fatalf("Load without DBPassword should succeed: %v", err)
+	}
+	if cfg.DBPassword != "" {
+		t.Errorf("DBPassword = %q, want empty", cfg.DBPassword)
+	}
+}
+
+func TestLoadInvalidDBType(t *testing.T) {
+	path := writeConf(t, validConf+"\nDBType=postgres\n")
+	if _, err := Load(path); err == nil {
+		t.Fatal("expected error for unsupported DBType")
 	}
 }
 
