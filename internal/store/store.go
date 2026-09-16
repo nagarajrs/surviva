@@ -184,6 +184,31 @@ func (s *Store) List() ([]Job, error) {
 	return jobs, rows.Err()
 }
 
+// ListTerminal returns every job in a terminal status (FAILED, CANCELED,
+// COMPLETED) -- List()'s mirror image. Backs `surviva prune`, which needs to
+// find every terminal job's CheckpointDir without touching active jobs.
+func (s *Store) ListTerminal() ([]Job, error) {
+	rows, err := s.db.Query(
+		`SELECT id, pid, pgid, checkpoint_dir, command, work_dir, hook_checkpoint, hook_resume, status, failure_reason, registered_at, updated_at
+		 FROM jobs WHERE status IN (?, ?, ?) ORDER BY registered_at ASC`,
+		string(StatusFailed), string(StatusCanceled), string(StatusCompleted),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list terminal jobs: %w", err)
+	}
+	defer rows.Close()
+
+	var jobs []Job
+	for rows.Next() {
+		j, err := scanJob(rows)
+		if err != nil {
+			return nil, err
+		}
+		jobs = append(jobs, j)
+	}
+	return jobs, rows.Err()
+}
+
 // UpdateStatus moves a job to a new status, validating the transition and
 // refreshing updated_at. failureReason is stored as-is (pass "" if not
 // applicable to the target status).

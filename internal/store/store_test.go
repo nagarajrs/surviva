@@ -87,6 +87,26 @@ func TestListExcludesTerminalIncludesActive(t *testing.T) {
 		}
 	}
 
+	// ListTerminal is List()'s mirror image.
+	gotTerminal, err := s.ListTerminal()
+	if err != nil {
+		t.Fatalf("ListTerminal: %v", err)
+	}
+	gotTerminalIDs := map[string]bool{}
+	for _, j := range gotTerminal {
+		gotTerminalIDs[j.ID] = true
+	}
+	for _, st := range terminal {
+		if !gotTerminalIDs["job-"+string(st)] {
+			t.Errorf("ListTerminal() missing terminal job with status %s", st)
+		}
+	}
+	for _, st := range active {
+		if gotTerminalIDs["job-"+string(st)] {
+			t.Errorf("ListTerminal() included active job with status %s", st)
+		}
+	}
+
 	// Every terminal job must still be reachable via Get.
 	for _, st := range terminal {
 		if _, err := s.Get("job-" + string(st)); err != nil {
