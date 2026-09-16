@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -70,6 +71,11 @@ func Load(path string) (Config, error) {
 	}
 	defer f.Close()
 
+	info, err := f.Stat()
+	if err != nil {
+		return Config{}, fmt.Errorf("stat %s: %w", path, err)
+	}
+
 	raw := map[string]string{}
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
@@ -92,7 +98,27 @@ func Load(path string) (Config, error) {
 		return Config{}, fmt.Errorf("read %s: %w", path, err)
 	}
 
-	return validate(path, raw)
+	cfg, err := validate(path, raw)
+	if err != nil {
+		return Config{}, err
+	}
+	warnIfWorldReadable(path, info, cfg)
+	return cfg, nil
+}
+
+// warnIfWorldReadable flags a surviva.conf that's readable by group or other
+// when it actually holds a secret (DBPassword) -- non-fatal, since plenty of
+// deployments manage this some other way (SELinux, ACLs), and failing an
+// otherwise-valid config over file permissions would be a breaking change
+// for anyone upgrading. Skipped on Windows, where the permission bits this
+// checks don't carry the same meaning.
+func warnIfWorldReadable(path string, info os.FileInfo, cfg Config) {
+	if runtime.GOOS == "windows" || cfg.DBPassword == "" {
+		return
+	}
+	if info.Mode().Perm()&0o077 != 0 {
+		fmt.Fprintf(os.Stderr, "surviva: warning: %s is readable by group/other (mode %04o) and contains a DBPassword -- recommend chmod 600 %s\n", path, info.Mode().Perm(), path)
+	}
 }
 
 // knownKeys is the canonical (uppercase) directive name set. Keys are

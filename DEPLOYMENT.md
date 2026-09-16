@@ -73,7 +73,12 @@ sudo criu check   # some checks may warn under a restrictive kernel config -- no
 ```bash
 sudo mkdir -p /etc/surviva /var/lib/surviva/checkpoints /var/log/surviva
 sudo chmod 700 /etc/surviva   # surviva.conf can hold a MySQL password in plaintext -- root-only, not world-readable
+sudo chmod 600 /etc/surviva/surviva.conf
 ```
+
+If `surviva.conf` sets `DBPassword` and somehow ends up group/world-readable
+anyway, `surviva daemon`/any `surviva` CLI command prints a warning to
+stderr at load time (not a hard failure — see `SPEC-config.md`).
 
 `/etc/surviva/surviva.conf` — the minimal SQLite-backed setup:
 

@@ -105,6 +105,23 @@ the actual-file-read path):
 - `NotifyTargetType`/`NotifyTargetARN` both absent → notification disabled,
   no validation triggered; `NotifyTargetType` set without `NotifyTargetARN`
   (or vice versa) → rejected; an unsupported `NotifyTargetType` → rejected.
+- A world/group-readable file that sets `DBPassword` prints a non-fatal
+  warning to stderr (`chmod 600` on it silences it); the same file with no
+  `DBPassword`, or any file at `0600`, is silent. Skipped on Windows, where
+  the permission bits being checked don't carry the same meaning.
+
+## Config-file permissions
+
+`Load` checks the file's own mode (via `os.File.Stat`, not a second
+`os.Stat(path)` call) *after* validation, so it only ever fires for a config
+that actually parsed successfully and actually has something worth
+protecting (`DBPassword` set). Deliberately a warning, not a load error:
+plenty of deployments manage this some other way (SELinux, ACLs), and
+turning an existing, working `surviva.conf` into a hard failure over its
+permission bits would be a breaking change for anyone upgrading in place.
+`deploy/install.sh` already writes `/etc/surviva` `0700` and the conf file
+`0600`, so this only fires when something *else* widened the permissions
+afterward.
 
 ## Boundaries
 

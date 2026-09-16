@@ -1,8 +1,12 @@
 package config
 
 import (
+	"bytes"
+	"io"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
@@ -158,6 +162,80 @@ DBName=surviva_jobs
 	if cfg.DBPath != "" {
 		t.Errorf("DBPath = %q, want empty when DBType=mysql", cfg.DBPath)
 	}
+}
+
+func TestLoadWarnsWhenPasswordFileWorldReadable(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("permission-bit check is skipped on Windows")
+	}
+	content := "CloudProvider=aws\nPollIntervalSeconds=5\nAuditLogPath=/x\nCheckpointBaseDir=/y\nDBType=mysql\nDBHost=h\nDBPort=3306\nDBUser=u\nDBPassword=secret\nDBName=d\n"
+
+	t.Run("world-readable with a password warns", func(t *testing.T) {
+		path := writeConf(t, content)
+		if err := os.Chmod(path, 0o644); err != nil {
+			t.Fatalf("chmod: %v", err)
+		}
+		stderr := captureStderr(t, func() {
+			if _, err := Load(path); err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+		})
+		if !strings.Contains(stderr, "readable by group/other") {
+			t.Errorf("expected a permission warning on stderr, got: %q", stderr)
+		}
+	})
+
+	t.Run("chmod 600 with a password is silent", func(t *testing.T) {
+		path := writeConf(t, content)
+		if err := os.Chmod(path, 0o600); err != nil {
+			t.Fatalf("chmod: %v", err)
+		}
+		stderr := captureStderr(t, func() {
+			if _, err := Load(path); err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+		})
+		if stderr != "" {
+			t.Errorf("expected no warning for a chmod 600 file, got: %q", stderr)
+		}
+	})
+
+	t.Run("world-readable with no password is silent", func(t *testing.T) {
+		path := writeConf(t, validConf) // sqlite, no DBPassword field at all
+		if err := os.Chmod(path, 0o644); err != nil {
+			t.Fatalf("chmod: %v", err)
+		}
+		stderr := captureStderr(t, func() {
+			if _, err := Load(path); err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+		})
+		if stderr != "" {
+			t.Errorf("expected no warning when there's no secret to protect, got: %q", stderr)
+		}
+	})
+}
+
+// captureStderr redirects os.Stderr for the duration of fn and returns what
+// was written to it.
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	orig := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	os.Stderr = w
+	defer func() { os.Stderr = orig }()
+
+	fn()
+
+	w.Close()
+	var buf bytes.Buffer
+	if _, err := io.Copy(&buf, r); err != nil {
+		t.Fatalf("read captured stderr: %v", err)
+	}
+	return buf.String()
 }
 
 func TestLoadMySQLMissingRequiredField(t *testing.T) {
