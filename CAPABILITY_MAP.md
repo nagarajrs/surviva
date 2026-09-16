@@ -24,6 +24,14 @@ Each module spec is reviewed and approved before that module's own Plan
 phase starts, per `spec-driven-development`. This file is the index — update
 the table (spec link, new modules) as each one lands, don't let it drift.
 
+**Cross-cutting specs** (not modules of their own, but formalize a feature
+spanning several of the above):
+
+- [SPEC-hooks.md](SPEC-hooks.md) — custom checkpoint/resume hooks
+  (`-hook-checkpoint`/`-hook-resume`), spanning `store`, `daemon`, and
+  `surviva-cli`. See also [hooks/README.md](hooks/README.md) and
+  `hooks/examples/` for writing one.
+
 See [LIMITATIONS.md](LIMITATIONS.md) for real gotchas found testing this
 redesign (currently: a tracked process attached to an interactive terminal
 can't be checkpointed at all — a CRIU constraint, not a bug).

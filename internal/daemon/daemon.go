@@ -163,6 +163,12 @@ func (d *Daemon) handleRegister(req ipc.Request) ipc.Response {
 	if d.interrupted.Load() {
 		return ipc.Response{OK: false, Error: "daemon has already received an interruption signal; refusing new registrations"}
 	}
+	if err := validateHookPath("hook-checkpoint", req.Job.HookCheckpoint); err != nil {
+		return ipc.Response{OK: false, Error: err.Error()}
+	}
+	if err := validateHookPath("hook-resume", req.Job.HookResume); err != nil {
+		return ipc.Response{OK: false, Error: err.Error()}
+	}
 
 	now := time.Now().UTC()
 	j := store.Job{
@@ -190,6 +196,28 @@ func (d *Daemon) handleRegister(req ipc.Request) ipc.Response {
 		}
 	}
 	return ipc.Response{OK: true, JobID: id}
+}
+
+// validateHookPath rejects a non-empty hook path that isn't a regular,
+// executable file, so a typo'd or non-executable hook is caught at
+// registration time rather than discovered only when the job actually
+// needs checkpointing (see SPEC-hooks.md). An empty path (meaning "use
+// CRIU" for that operation) is never checked here.
+func validateHookPath(flagName, path string) error {
+	if path == "" {
+		return nil
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return fmt.Errorf("%s %q: %w", flagName, path, err)
+	}
+	if info.IsDir() {
+		return fmt.Errorf("%s %q: is a directory, not an executable file", flagName, path)
+	}
+	if info.Mode()&0o111 == 0 {
+		return fmt.Errorf("%s %q: not executable", flagName, path)
+	}
+	return nil
 }
 
 func (d *Daemon) handleList() ipc.Response {

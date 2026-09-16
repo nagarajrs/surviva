@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -95,6 +96,58 @@ func TestRegisterRefusedAfterInterrupted(t *testing.T) {
 	if resp.OK {
 		t.Fatal("expected Register to be refused after interruption latch")
 	}
+}
+
+func TestRegisterValidatesHookPaths(t *testing.T) {
+	d := newTestDaemon(t)
+
+	t.Run("nonexistent path rejected", func(t *testing.T) {
+		resp := d.dispatch(ipc.Request{Action: ipc.ActionRegister, Job: &ipc.RegisterJob{
+			PID: 1, PGID: 1, HookCheckpoint: filepath.Join(t.TempDir(), "does-not-exist.sh"),
+		}})
+		if resp.OK {
+			t.Error("expected Register to reject a nonexistent hook-checkpoint path")
+		}
+	})
+
+	t.Run("non-executable file rejected", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("executable-bit semantics don't apply on Windows")
+		}
+		nonExec := filepath.Join(t.TempDir(), "not-executable.sh")
+		if err := os.WriteFile(nonExec, []byte("#!/bin/sh\necho hi\n"), 0o644); err != nil {
+			t.Fatalf("write non-exec file: %v", err)
+		}
+		resp := d.dispatch(ipc.Request{Action: ipc.ActionRegister, Job: &ipc.RegisterJob{
+			PID: 1, PGID: 1, HookResume: nonExec,
+		}})
+		if resp.OK {
+			t.Error("expected Register to reject a non-executable hook-resume path")
+		}
+	})
+
+	t.Run("real executable accepted", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("executable-bit semantics don't apply on Windows")
+		}
+		exec := filepath.Join(t.TempDir(), "real-hook.sh")
+		if err := os.WriteFile(exec, []byte("#!/bin/sh\necho hi\n"), 0o755); err != nil {
+			t.Fatalf("write exec file: %v", err)
+		}
+		resp := d.dispatch(ipc.Request{Action: ipc.ActionRegister, Job: &ipc.RegisterJob{
+			PID: 1, PGID: 1, HookCheckpoint: exec,
+		}})
+		if !resp.OK {
+			t.Errorf("expected Register to accept a real executable hook path: %s", resp.Error)
+		}
+	})
+
+	t.Run("empty hook fields never validated", func(t *testing.T) {
+		resp := d.dispatch(ipc.Request{Action: ipc.ActionRegister, Job: &ipc.RegisterJob{PID: 1, PGID: 1}})
+		if !resp.OK {
+			t.Errorf("expected Register with no hooks to succeed: %s", resp.Error)
+		}
+	})
 }
 
 func TestCompleteTransitionsByExitCode(t *testing.T) {
