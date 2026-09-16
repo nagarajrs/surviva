@@ -93,7 +93,7 @@ invalid transition is a caller bug, not a recoverable runtime condition, so
 ## API
 
 ```go
-func Open(path string) (*Store, error)
+func Open(path string) (*Store, error) // creates path's parent directory if missing
 func (s *Store) Close() error
 
 func (s *Store) Insert(j Job) error

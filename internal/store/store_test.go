@@ -6,6 +6,19 @@ import (
 	"time"
 )
 
+func TestOpenCreatesMissingParentDir(t *testing.T) {
+	// Regression: Open must create its db file's parent directory itself
+	// (like auditlog.Open does), not assume the caller already did --
+	// daemon's own wiring only ensures the socket's dir exists, not the
+	// store's.
+	path := filepath.Join(t.TempDir(), "nested", "does", "not", "exist", "jobs.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open with missing parent dirs: %v", err)
+	}
+	s.Close()
+}
+
 func openTestStore(t *testing.T) *Store {
 	t.Helper()
 	s, err := Open(filepath.Join(t.TempDir(), "jobs.db"))
