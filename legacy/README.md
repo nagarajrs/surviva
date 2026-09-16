@@ -11,9 +11,15 @@ it hard to build or test any one piece in isolation — the reason for the
 redesign. Specific parts of it are being carried forward directly into the
 new modules rather than rewritten from scratch:
 
-- `internal/procattr`, `internal/fdguard` — CRIU session/fd hygiene
-- `internal/imds` — AWS Spot signal polling, a starting point for the new
-  daemon's pluggable cloud-provider interface
+- `internal/criu`, `internal/checkpoint`, `internal/resume` — CRIU dump/
+  restore wrapping, reused as-is (or near enough) in the new `daemon` module
+- `internal/procsignal`, `internal/idgen` — process-group signaling and job
+  ID generation, reused as-is in `daemon`
+- `internal/imds` — AWS Spot signal polling, wrapped behind the new
+  `daemon`'s pluggable cloud-provider interface
+- `internal/procattr`, `internal/fdguard` — CRIU session/fd hygiene needed
+  when *starting* a tracked process, so these belong in the future
+  `surviva-cli` module (whichever command execs the child), not `daemon`
 - `internal/store`, `internal/job` — SQLite job store and status enum, close
   in spirit to the new `store` module
 - `docs/design-record`, `docs/limitations` — decisions and gotchas (CRIU

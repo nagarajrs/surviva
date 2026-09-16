@@ -1,0 +1,249 @@
+# Spec: `daemon` module
+
+## Objective
+
+The long-running process: the only thing that writes to `store`, the thing
+that actually shells out to CRIU, and the thing that watches for a cloud
+interruption signal and reacts to it. It also defines and serves the
+interface `surviva-cli` talks to — per the capability map, that mechanism is
+this module's call. It's a Unix domain socket speaking newline-delimited
+JSON, exactly like `legacy/internal/ipc` + `legacy/internal/daemon` already
+proved out; this spec keeps that shape and adapts it to the new store/status
+model.
+
+**Correction to the capability map's original assumption:** `internal/
+procattr` (session detachment) and `internal/fdguard` (closing inherited
+fds) are `surviva-cli run`-time concerns — whoever `exec`s the tracked
+process needs them, and that's the CLI, not the daemon (this matches
+`legacy/cmd/surviva/run.go`'s actual use of them, not `legacy/internal/
+daemon`). They belong in `surviva-cli`'s future spec. `legacy/README.md` will
+be corrected to say so.
+
+## Reused from `legacy/` (as-is, or with a small adaptation noted)
+
+| Package | Change |
+|---|---|
+| `internal/criu` (`Dump`/`Restore`/`Available`) | None. |
+| `internal/checkpoint` (`Run`) | Adapted: takes the checkpoint dir directly (`Run(ctx, dir, job)`) instead of a `baseDir` it joins with the job id itself. `store.Job.CheckpointDir` is now the single source of truth for where a job's images live, so the old `Dir(baseDir, jobID)` join is redundant and dropped. |
+| `internal/resume` (`Run`) | None — it already took a full dir. |
+| `internal/imds` (`Client`, `Poller`) | Wrapped behind a new `Provider` interface (below) so Azure/GCP can be added later as siblings, not a rewrite. |
+| `internal/procsignal` (`KillGroup`) | None — used by `Cancel`. |
+| `internal/idgen` (`New`) | None — used by `Register`. |
+
+Not reused (out of scope per the capability map): `internal/remote`
+(S3/DynamoDB), `internal/ebsmount`.
+
+## Cloud provider abstraction
+
+```go
+package provider
+
+// Provider watches for an interruption/rebalance-style signal and calls
+// onSignal (at most once per real signal) until ctx is done.
+type Provider interface {
+    Run(ctx context.Context, onSignal func(trigger string))
+}
+```
+
+`aws.New(...)` (adapting `legacy/internal/imds`) is the only implementation
+today; `config.CloudProvider == "aws"` selects it (already the only value
+`config.Load` accepts — see `SPEC-config.md`). Azure/GCP become new packages
+implementing the same interface once `config` accepts those values too; no
+change to `daemon`'s own logic when that happens.
+
+## Config addition
+
+`config`'s five directives don't cover how many jobs get checkpointed at
+once when an interruption fires across several `RUNNING` jobs at the same
+time. Adding one **optional** sixth directive (not required — every
+existing `surviva.conf` stays valid):
+
+| Key | Type | Required | Default | Meaning |
+|---|---|---|---|---|
+| `MaxConcurrentCheckpoints` | positive int | no | `runtime.NumCPU()` | Bound on simultaneous CRIU dumps during a fan-out (same rationale as `legacy`: dumping many large process trees fully in parallel can starve disk/CPU badly enough that none finish in time). |
+
+This is the one change to the already-built `config` module this spec
+requires; everything else here is new code in `daemon` itself.
+
+## Job lifecycle operations
+
+All four below share one rule carried forward from `legacy` (ADR-3): a
+job's `store` status arbitrates races between daemon-side transitions and
+whatever the CLI/interruption path is doing concurrently. Every transition
+goes through `store.UpdateStatus`/`UpdatePID`, which already reject an
+invalid `from` state — `daemon` doesn't need its own separate guard on top,
+just surface `store`'s error back over IPC.
+
+**Checkpoint** (triggered by `Pause` below, or by the interruption fan-out —
+identical code path either way):
+1. `store.UpdateStatus(id, CHECKPOINT_IN_PROGRESS, "")`
+2. `audit.Log({daemon, checkpoint_started, id, ok})`
+3. `checkpoint.Run(ctx, job.CheckpointDir, job)`
+4. Success → `store.UpdateStatus(id, CHECKPOINT_CREATED, "")`,
+   `audit.Log({daemon, checkpoint_succeeded, id, ok})`.
+   Failure → `store.UpdateStatus(id, CHECKPOINT_CREATION_FAILED, err.Error())`,
+   `audit.Log({daemon, checkpoint_failed, id, error, err.Error()})`.
+
+No separate "storage push" step exists yet (S3/EBS is out of scope), so
+"checkpointed" just means "dumped to `job.CheckpointDir` on local disk" —
+matching `legacy`'s original local-disk-only mode.
+
+**Resume** (from `CHECKPOINT_CREATED` or `RESTORE_FAILED`):
+1. `store.UpdateStatus(id, RESTORE_PENDING, "")`
+2. `audit.Log({daemon, restore_started, id, ok})`
+3. `resume.Run(ctx, job.CheckpointDir, job.HookResume, job.ID)` → new pid
+4. Success → `store.UpdatePID(id, pid, pid)` (moves to `RUNNING` per
+   `store`'s own transition table), `audit.Log({daemon, restore_succeeded, id, ok})`.
+   Failure → `store.UpdateStatus(id, RESTORE_FAILED, err.Error())`,
+   `audit.Log({daemon, restore_failed, id, error, err.Error()})`.
+
+**Cancel:**
+- If `RUNNING`: `procsignal.KillGroup(job.PGID, SIGTERM)`, then
+  `store.UpdateStatus(id, CANCELED, "")`.
+- If `CHECKPOINT_CREATED` / `CHECKPOINT_CREATION_FAILED` / `RESTORE_FAILED`:
+  no live process to signal (already stopped or never resumed) — just
+  `store.UpdateStatus(id, CANCELED, "")`.
+- If `CHECKPOINT_IN_PROGRESS` / `RESTORE_PENDING`: rejected by `store`
+  (no valid transition out of those to `CANCELED`) — surfaced as "job is
+  mid-checkpoint/restore, try again once it settles."
+- Checkpoint files on disk are **not** deleted on cancel (see Open
+  Questions) — same "no automatic cleanup" stance `store` already takes on
+  terminal jobs.
+
+**Complete** (the CLI reports its tracked child exited — normal end of
+`run`/`join`, not a checkpoint):
+- Request carries `JobID`, `ExitCode`, optional `ErrMsg`.
+- If current status isn't `RUNNING` anymore, this is a no-op (not an error)
+  — exactly `legacy`'s deregister race: the checkpoint subsystem may have
+  already moved the job past `RUNNING` (CRIU's dump stops the process,
+  which can race the CLI noticing its child exited).
+- Otherwise: `ExitCode == 0` → `COMPLETED`; else → `FAILED` with
+  `FailureReason` set to `ErrMsg` (or `"exited with code N"` if `ErrMsg` is
+  empty).
+
+**Register** (backs both a future `run` and `join` in `surviva-cli` — same
+daemon-side handling either way, they only differ in how the CLI fills out
+the request):
+1. Refused if the interruption latch (below) is set — same reasoning as
+   `legacy`: a job registered after a signal already fired has no realistic
+   path to being saved.
+2. `id := idgen.New()`.
+3. `CheckpointDir`: use the request's value if given (an explicit override,
+   e.g. from a future `--checkpoint-dir` flag), else
+   `filepath.Join(cfg.CheckpointBaseDir, id)`.
+4. `store.Insert(Job{..., Status: RUNNING})`.
+
+`daemon` does **not** write its own audit-log entry for "a Register/Pause/
+Resume/Cancel/Show/List request arrived" — that's `surviva-cli`'s job to log
+about itself (`component: "cli"`). `daemon` only logs its own internal
+activity (interruption detection, checkpoint/restore attempts), avoiding the
+same event being logged twice from both sides.
+
+## Interruption fan-out
+
+Same shape as `legacy/internal/daemon.handleInterruption`: on `onSignal`,
+latch `interrupted` (an `atomic.Bool`, refusing new `Register` calls from
+that point on), list every `RUNNING` job from `store`, and run the
+Checkpoint flow above for each, capped at `MaxConcurrentCheckpoints`
+concurrent via a bounded worker pool. Runs independently of any client
+connection — it's driven by the `Provider`, not by `dispatch`.
+
+## Wire protocol (`internal/ipc`, new package — `surviva-cli` imports it too)
+
+```go
+type Action string
+
+const (
+    ActionPing     Action = "ping"
+    ActionRegister Action = "register"
+    ActionList     Action = "list"
+    ActionShow     Action = "show"
+    ActionPause    Action = "pause"
+    ActionResume   Action = "resume"
+    ActionCancel   Action = "cancel"
+    ActionComplete Action = "complete"
+)
+
+type RegisterJob struct {
+    PID            int
+    PGID           int
+    Command        []string
+    WorkDir        string
+    CheckpointDir  string // optional override; daemon computes the default if empty
+    HookCheckpoint string
+    HookResume     string
+}
+
+type Request struct {
+    Action   Action
+    Job      *RegisterJob // Register
+    JobID    string       // Show/Pause/Resume/Cancel/Complete
+    ExitCode int          // Complete
+    ErrMsg   string        // Complete, optional
+}
+
+type Response struct {
+    OK      bool
+    Error   string
+    JobID   string
+    Job     *store.Job  // Show
+    Jobs    []store.Job // List
+    Message string       // e.g. "resumed as pid 4821"
+}
+```
+
+Transport: Unix domain socket, one JSON object per line, one goroutine per
+connection (`go handleConn(conn)`) so a slow `Pause`/`Resume` on one
+connection never blocks another client's `List`/`Show`. Socket path: same
+`SURVIVA_SOCKET` env var / per-OS default convention as `legacy/internal/
+ipc.DefaultSocketPath()` — reused verbatim, not reinvented.
+
+## Testing Strategy
+
+CRIU itself needs a real Linux box (per `legacy`'s own testing-strategy
+philosophy — real infra over mocks); that part is manual/integration, not
+`go test ./...`. What *is* unit-testable here, against a temp-file `store` +
+`auditlog` and a fake `Provider` that never fires:
+- `Register` → `List` shows it, `Show` finds it by id.
+- `Register` refused once the interruption latch is set.
+- `Complete` on a still-`RUNNING` job sets `COMPLETED`/`FAILED` correctly by
+  exit code; `Complete` on a job no longer `RUNNING` is a no-op, not an
+  error.
+- `Cancel` on `RUNNING` vs. `CHECKPOINT_CREATED` vs. `CHECKPOINT_IN_PROGRESS`
+  (the last one rejected) each behave as specified above.
+- A fake `Provider` firing `onSignal` triggers the interruption fan-out over
+  every `RUNNING` job and nothing else (verify via `store` status changes),
+  bounded by `MaxConcurrentCheckpoints`.
+
+## Boundaries
+
+- **Always:** every `store` write goes through the status-transition rules
+  it already enforces; refuse new `Register` once interrupted.
+- **Ask first:** adding another config directive beyond
+  `MaxConcurrentCheckpoints`; building S3/EBS/DynamoDB support here.
+- **Never:** let one slow client connection block another (per-connection
+  goroutines, not a single serialized loop); delete checkpoint files
+  automatically on any status transition (see Open Questions).
+
+## Success Criteria
+
+- Package compiles and its unit tests (above) pass without CRIU or any
+  cloud credentials present.
+- On a real Linux box with CRIU installed: `Register` → `Pause` → `Resume`
+  round-trips a real process (e.g. `sleep 300`) through the full status
+  sequence, checkpoint images land at the job's `CheckpointDir`.
+- A fake interruption signal checkpoints every `RUNNING` job and refuses
+  further registrations, mirroring `legacy`'s proven behavior.
+
+## Open Questions
+
+1. **Checkpoint-directory cleanup on `Cancel`.** Right now cancelling a
+   `CHECKPOINT_CREATED`/`CHECKPOINT_CREATION_FAILED`/`RESTORE_FAILED` job
+   leaves its checkpoint images on disk forever (matches `store`'s own "no
+   automatic pruning" stance). Say now if cancel should also delete
+   `job.CheckpointDir`'s contents, or if that's better left to an explicit
+   future cleanup command/tool.
+2. **`Complete` as the action name.** Chose it over reusing `legacy`'s
+   "Deregister" since it now carries an exit code and produces two
+   different terminal statuses, not a single unconditional untrack. Purely
+   a naming call — say so if you'd rather keep `Deregister`.
