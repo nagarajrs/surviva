@@ -20,42 +20,60 @@ status enum" job correctly — see Boundaries for exactly what changes.
 type Status string
 
 const (
-    StatusRunning           Status = "RUNNING"
-    StatusCheckpointCreated Status = "CHECKPOINT_CREATED"
-    StatusRestorePending    Status = "RESTORE_PENDING"
-    StatusRestoreFailed     Status = "RESTORE_FAILED"
-    StatusFailed            Status = "FAILED"
-    StatusCanceled          Status = "CANCELED"
-    StatusCompleted         Status = "COMPLETED"
+    StatusRunning                  Status = "RUNNING"
+    StatusCheckpointInProgress     Status = "CHECKPOINT_IN_PROGRESS"
+    StatusCheckpointCreated        Status = "CHECKPOINT_CREATED"
+    StatusCheckpointCreationFailed Status = "CHECKPOINT_CREATION_FAILED"
+    StatusRestorePending           Status = "RESTORE_PENDING"
+    StatusRestoreFailed            Status = "RESTORE_FAILED"
+    StatusFailed                   Status = "FAILED"
+    StatusCanceled                 Status = "CANCELED"
+    StatusCompleted                Status = "COMPLETED"
 )
 
 type Job struct {
     ID             string
     PID            int
     PGID           int
+    CheckpointDir  string
     Command        []string
     WorkDir        string
     HookCheckpoint string // optional, legacy's escape hatch for non-CRIU-friendly jobs
     HookResume     string
     Status         Status
-    FailureReason  string // set on FAILED/RESTORE_FAILED, empty otherwise
+    FailureReason  string // set on FAILED/CHECKPOINT_CREATION_FAILED/RESTORE_FAILED, empty otherwise
     RegisteredAt   time.Time
     UpdatedAt      time.Time
 }
 ```
 
-No `CheckpointDir` column: the checkpoint path stays deterministic —
-`filepath.Join(daemonCheckpointBaseDir, jobID)` — computed by `daemon` from
-its own config, exactly as `legacy/internal/checkpoint.Dir` already does. One
-less thing that can drift out of sync with reality.
+(Renamed `StatusCheckpointCreation` → `StatusCheckpointInProgress` from the
+first draft so the Go identifier actually matches its `"CHECKPOINT_IN_PROGRESS"`
+value — no behavior change.)
+
+**`CheckpointDir` is a real column now** (reversing the first draft's "compute
+it deterministically, don't store it" call): the caller decides this value at
+`Insert` time and `store` just persists it verbatim. `daemon` fills it in as
+`filepath.Join(config.CheckpointBaseDir, jobID)` by default, or with whatever
+path `surviva run --checkpoint-dir <path>` passed through, if the user
+overrode it. `store` itself has no dependency on `config` and doesn't compute
+or validate this path — it's an opaque string as far as this module is
+concerned, matching the "store depends on nothing" line in the capability
+map.
 
 ### Status transitions
 
 ```
-RUNNING ──checkpoint──> CHECKPOINT_CREATED
-RUNNING ──cancel──────> CANCELED
-RUNNING ──exits 0──────> COMPLETED
-RUNNING ──dies/errors──> FAILED
+RUNNING ──checkpoint requested──> CHECKPOINT_IN_PROGRESS
+RUNNING ──cancel─────────────────> CANCELED
+RUNNING ──exits 0────────────────> COMPLETED
+RUNNING ──dies/errors────────────> FAILED
+
+CHECKPOINT_IN_PROGRESS ──checkpoint succeeds──> CHECKPOINT_CREATED
+CHECKPOINT_IN_PROGRESS ──checkpoint fails─────> CHECKPOINT_CREATION_FAILED
+
+CHECKPOINT_CREATION_FAILED ──retry checkpoint──> CHECKPOINT_IN_PROGRESS   (proposed — see Open Questions)
+CHECKPOINT_CREATION_FAILED ──cancel────────────> CANCELED                 (proposed — see Open Questions)
 
 CHECKPOINT_CREATED ──resume requested──> RESTORE_PENDING
 CHECKPOINT_CREATED ──cancel────────────> CANCELED
@@ -94,8 +112,10 @@ contract.
 
 `go test ./...` in this package, table-driven, `modernc.org/sqlite` against a
 temp-file DB (matches legacy's approach — no new test infra needed):
-- Insert → Get round-trips every field.
-- `List()` excludes each terminal status, includes each active one.
+- Insert → Get round-trips every field, `CheckpointDir` included.
+- `List()` excludes each terminal status, includes each active one
+  (`CHECKPOINT_CREATION_FAILED` and `RESTORE_FAILED` included, per the
+  "active" default below).
 - Every edge in the transition table above succeeds; a handful of invalid
   ones (e.g. `COMPLETED → RUNNING`, `CANCELED → CHECKPOINT_CREATED`) are
   rejected.
@@ -120,16 +140,25 @@ temp-file DB (matches legacy's approach — no new test infra needed):
 - All transition-table tests pass.
 - A job that reaches `FAILED`/`CANCELED`/`COMPLETED` is absent from `List()`
   but still returned by `Get(id)` with its final status and (for
-  `FAILED`/`RESTORE_FAILED`) a non-empty `FailureReason`.
+  `FAILED`/`CHECKPOINT_CREATION_FAILED`/`RESTORE_FAILED`) a non-empty
+  `FailureReason`.
 
 ## Open Questions
 
-1. **Is `RESTORE_FAILED` "active" or "terminal" for `List()`?** Taking it as
-   *active* here (it's stuck and needs attention, not finished — someone
-   should still see it in `surviva list` until they cancel or retry it).
-   Say so now if you want it to behave like a terminal state instead.
-2. **Job identity for non-process targets.** Right now `PID`/`PGID` assume
-   the tracked thing is always an OS process surviva itself started via
-   `run`. If pause ever needs to target an *externally* started process (not
-   launched via `surviva run`), the model already supports it (just a PID),
-   so no change needed unless something else comes up.
+1. **Are `CHECKPOINT_CREATION_FAILED` and `RESTORE_FAILED` "active" or
+   "terminal" for `List()`?** Taking both as *active* here (stuck and
+   needing attention, not finished — should still show in `surviva list`
+   until someone cancels or retries) and giving both a symmetric
+   retry/cancel path in the transition table above. Say so now if either (or
+   both) should behave like a terminal state instead — i.e. drop off `list`
+   the moment the failure happens, only visible via `show` from then on.
+2. **`surviva join <PID>`, resolved into scope.** Confirmed: a future
+   `surviva-cli` command to adopt an already-running, externally-started
+   process into tracking (not launched via `surviva run`). `store`'s model
+   needs no change for this — `Job` only ever required a `PID`/`PGID`, never
+   assumed surviva itself started the process. One real nuance for whichever
+   module implements `join`: `Command`/`WorkDir` won't be known from a
+   `run`-style invocation, so they'll need to be populated best-effort (e.g.
+   reading `/proc/<pid>/cmdline` and `/proc/<pid>/cwd` on Linux) or left
+   empty — `store` accepts either, since neither field is validated
+   non-empty here. Full command semantics belong in `surviva-cli`'s own spec.

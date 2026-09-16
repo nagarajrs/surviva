@@ -22,9 +22,11 @@ DBPath=/var/lib/surviva/jobs.db
 
 - One `Key=Value` per line; whitespace around `=` trimmed.
 - `#` as the first non-whitespace character makes the whole line a comment.
-- Keys are case-sensitive, exact match against the known set below (simplest
-  option; flagged in Open Questions in case case-insensitivity turns out to
-  matter later).
+- Keys are **case-insensitive** (`cloudprovider`, `CloudProvider`, and
+  `CLOUDPROVIDER` all match the same directive), matching Slurm's own
+  convention. Matching is done by uppercasing both the parsed key and the
+  known-key table before comparing; values are left exactly as written (no
+  case-folding on values).
 - An unknown key is a load-time error, not a warning — this file is only
   ever read by the exact binary version that ships with it, so a typo'd or
   stale key should fail loudly, not silently no-op.
@@ -78,6 +80,8 @@ the actual-file-read path):
   implemented" error, not a generic parse failure.
 - Comments and blank lines are ignored; a value with surrounding whitespace
   is trimmed.
+- `cloudprovider=aws` / `CLOUDPROVIDER=aws` / `CloudProvider=aws` all parse
+  identically (case-insensitive key match); the value itself is untouched.
 
 ## Boundaries
 
@@ -97,10 +101,6 @@ the actual-file-read path):
 
 ## Open Questions
 
-1. **Case sensitivity.** Taking keys as case-sensitive exact-match
-   (`CloudProvider`, not `cloudprovider`) for simplicity. Slurm itself is
-   case-insensitive on most keys — say now if you want that matched.
-2. **`PollIntervalSeconds` as a bare int vs. a duration string** (`5` vs.
-   `5s`). Went with Slurm's own convention (bare integer seconds) since
-   that's the explicit model to follow; easy to change if you'd rather allow
-   `5s`/`1m` directly.
+None remaining — both prior questions are resolved: keys are
+case-insensitive, and `PollIntervalSeconds` stays a bare integer (no
+duration-string support).
