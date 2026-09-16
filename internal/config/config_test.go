@@ -192,6 +192,54 @@ func TestLoadInvalidDBType(t *testing.T) {
 	}
 }
 
+func TestLoadNotifyTargetDisabledByDefault(t *testing.T) {
+	cfg, err := Load(writeConf(t, validConf))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.NotifyTargetType != "" || cfg.NotifyTargetARN != "" {
+		t.Errorf("got NotifyTargetType=%q NotifyTargetARN=%q, want both empty", cfg.NotifyTargetType, cfg.NotifyTargetARN)
+	}
+}
+
+func TestLoadNotifyTargetLambda(t *testing.T) {
+	cfg, err := Load(writeConf(t, validConf+"\nNotifyTargetType=lambda\nNotifyTargetARN=arn:aws:lambda:us-east-1:123456789012:function:my-fn\n"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.NotifyTargetType != "lambda" || cfg.NotifyTargetARN != "arn:aws:lambda:us-east-1:123456789012:function:my-fn" {
+		t.Errorf("got %+v", cfg)
+	}
+}
+
+func TestLoadNotifyTargetStepFunction(t *testing.T) {
+	cfg, err := Load(writeConf(t, validConf+"\nNotifyTargetType=stepfunction\nNotifyTargetARN=arn:aws:states:us-east-1:123456789012:stateMachine:my-sm\n"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.NotifyTargetType != "stepfunction" {
+		t.Errorf("got %+v", cfg)
+	}
+}
+
+func TestLoadNotifyTargetTypeWithoutARN(t *testing.T) {
+	if _, err := Load(writeConf(t, validConf+"\nNotifyTargetType=lambda\n")); err == nil {
+		t.Fatal("expected error for NotifyTargetType without NotifyTargetARN")
+	}
+}
+
+func TestLoadNotifyTargetARNWithoutType(t *testing.T) {
+	if _, err := Load(writeConf(t, validConf+"\nNotifyTargetARN=arn:aws:lambda:us-east-1:123456789012:function:my-fn\n")); err == nil {
+		t.Fatal("expected error for NotifyTargetARN without NotifyTargetType")
+	}
+}
+
+func TestLoadNotifyTargetInvalidType(t *testing.T) {
+	if _, err := Load(writeConf(t, validConf+"\nNotifyTargetType=sns\nNotifyTargetARN=arn:aws:sns:us-east-1:123456789012:my-topic\n")); err == nil {
+		t.Fatal("expected error for unsupported NotifyTargetType")
+	}
+}
+
 func TestLoadUnrecognizedProvider(t *testing.T) {
 	path := writeConf(t, `
 CloudProvider=digitalocean

@@ -2,10 +2,12 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -19,7 +21,41 @@ import (
 // specifically exercising the interruption fan-out.
 type fakeProvider struct{}
 
-func (fakeProvider) Run(ctx context.Context, onSignal func(string)) { <-ctx.Done() }
+func (fakeProvider) Run(ctx context.Context, onSignal func(Signal)) { <-ctx.Done() }
+
+// fakeNotifier records every payload it's given, for tests exercising the
+// notify path without a real AWS call. notify runs Notify in its own
+// goroutine, so tests read a call back via the buffered channel (with a
+// timeout) rather than sleeping and polling payloads directly.
+type fakeNotifier struct {
+	mu       sync.Mutex
+	payloads [][]byte
+	err      error
+	called   chan []byte
+}
+
+func newFakeNotifier() *fakeNotifier {
+	return &fakeNotifier{called: make(chan []byte, 8)}
+}
+
+func (n *fakeNotifier) Notify(ctx context.Context, payload []byte) error {
+	n.mu.Lock()
+	n.payloads = append(n.payloads, payload)
+	n.mu.Unlock()
+	n.called <- payload
+	return n.err
+}
+
+func (n *fakeNotifier) awaitCall(t *testing.T) []byte {
+	t.Helper()
+	select {
+	case p := <-n.called:
+		return p
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for Notify to be called")
+		return nil
+	}
+}
 
 func newTestDaemon(t *testing.T) *Daemon {
 	t.Helper()
@@ -417,7 +453,7 @@ func TestInterruptionFanOutChecksAllRunningJobsOnly(t *testing.T) {
 	untouched := registerJob(t, d)
 	d.dispatch(ipc.Request{Action: ipc.ActionCancel, JobID: untouched})
 
-	d.handleInterruption("test-trigger")
+	d.handleInterruption(Signal{Trigger: "test-trigger"})
 
 	if !d.interrupted.Load() {
 		t.Error("expected interrupted latch to be set")
@@ -437,6 +473,59 @@ func TestInterruptionFanOutChecksAllRunningJobsOnly(t *testing.T) {
 	resp := d.dispatch(ipc.Request{Action: ipc.ActionRegister, Job: &ipc.RegisterJob{PID: 1, PGID: 1}})
 	if resp.OK {
 		t.Error("expected Register to be refused after the fan-out latched interrupted")
+	}
+}
+
+func TestNotifySkippedWhenNotConfigured(t *testing.T) {
+	d := newTestDaemon(t) // no Notifier set -- must not panic or error
+	registerJob(t, d)
+	d.handleInterruption(Signal{Trigger: "test-trigger"})
+	// No assertion beyond "didn't panic" -- notifier is nil by construction.
+}
+
+func TestNotifyCalledWithTriggerDetailAndJobs(t *testing.T) {
+	d := newTestDaemon(t)
+	notifier := newFakeNotifier()
+	d.notifier = notifier
+
+	id := registerJob(t, d)
+	// A canceled job must not appear in the notify payload's job list --
+	// only what's actually RUNNING at the moment of the signal.
+	skipped := registerJob(t, d)
+	d.dispatch(ipc.Request{Action: ipc.ActionCancel, JobID: skipped})
+
+	d.handleInterruption(Signal{Trigger: "interruption-notice", Detail: map[string]string{"instance_id": "i-123"}})
+
+	raw := notifier.awaitCall(t)
+	var payload notifyPayload
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatalf("payload is not valid JSON: %v\n%s", err, raw)
+	}
+	if payload.Trigger != "interruption-notice" {
+		t.Errorf("Trigger = %q, want %q", payload.Trigger, "interruption-notice")
+	}
+	if payload.Detail["instance_id"] != "i-123" {
+		t.Errorf("Detail[instance_id] = %q, want %q", payload.Detail["instance_id"], "i-123")
+	}
+	if len(payload.Jobs) != 1 || payload.Jobs[0].ID != id {
+		t.Errorf("Jobs = %+v, want exactly job %s", payload.Jobs, id)
+	}
+}
+
+func TestNotifyFiresEvenWithNoRunningJobs(t *testing.T) {
+	d := newTestDaemon(t)
+	notifier := newFakeNotifier()
+	d.notifier = notifier
+
+	d.handleInterruption(Signal{Trigger: "test-trigger"})
+
+	raw := notifier.awaitCall(t)
+	var payload notifyPayload
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatalf("payload is not valid JSON: %v\n%s", err, raw)
+	}
+	if len(payload.Jobs) != 0 {
+		t.Errorf("Jobs = %+v, want empty", payload.Jobs)
 	}
 }
 
@@ -461,7 +550,7 @@ func TestInterruptionFanOutBoundedByMaxConcurrent(t *testing.T) {
 	for i := 0; i < 6; i++ {
 		registerJob(t, d)
 	}
-	d.handleInterruption("test-trigger")
+	d.handleInterruption(Signal{Trigger: "test-trigger"})
 
 	if maxSeen > 2 {
 		t.Errorf("max concurrent checkpoints observed = %d, want <= 2", maxSeen)

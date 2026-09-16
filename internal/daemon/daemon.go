@@ -25,12 +25,34 @@ import (
 	"surviva/internal/store"
 )
 
+// notifyTimeout bounds a single Notifier.Notify call -- unlike a local CRIU
+// dump, this is a network call to an external AWS API and must not be
+// allowed to hang indefinitely.
+const notifyTimeout = 10 * time.Second
+
+// Signal is what a Provider reports on each interruption/rebalance event.
+type Signal struct {
+	Trigger string // "interruption-notice" | "rebalance-recommendation"
+	// Detail carries cloud-specific extra context (AWS: instance_id,
+	// availability_zone, action, notice_time) for embedding in a Notifier
+	// payload. Best-effort -- may be nil or missing individual keys.
+	Detail map[string]string
+}
+
 // Provider is satisfied by internal/daemon/provider.Provider -- redeclared
 // here (rather than imported) so this package doesn't force every caller to
 // also import the provider package just to construct a Daemon; any type
 // with this method works, including the real providers and test fakes.
 type Provider interface {
-	Run(ctx context.Context, onSignal func(trigger string))
+	Run(ctx context.Context, onSignal func(Signal))
+}
+
+// Notifier delivers a JSON payload to an external target (e.g. an AWS
+// Lambda or Step Functions notifier under internal/daemon/notify) when an
+// interruption/rebalance signal fires. nil means "not configured" --
+// handleInterruption skips this step entirely.
+type Notifier interface {
+	Notify(ctx context.Context, payload []byte) error
 }
 
 // Config configures a Daemon.
@@ -38,6 +60,7 @@ type Config struct {
 	Store                    *store.Store
 	Audit                    *auditlog.Logger
 	Provider                 Provider
+	Notifier                 Notifier // optional; nil disables notification
 	CheckpointBaseDir        string
 	MaxConcurrentCheckpoints int // <= 0 defaults to runtime.NumCPU()
 }
@@ -47,6 +70,7 @@ type Daemon struct {
 	store                    *store.Store
 	audit                    *auditlog.Logger
 	provider                 Provider
+	notifier                 Notifier
 	checkpointBaseDir        string
 	maxConcurrentCheckpoints int
 
@@ -73,6 +97,7 @@ func New(cfg Config) *Daemon {
 		store:                    cfg.Store,
 		audit:                    cfg.Audit,
 		provider:                 cfg.Provider,
+		notifier:                 cfg.Notifier,
 		checkpointBaseDir:        cfg.CheckpointBaseDir,
 		maxConcurrentCheckpoints: max,
 		checkpointFunc:           checkpoint.Run,
@@ -413,7 +438,8 @@ func (d *Daemon) resumeJob(ctx context.Context, j store.Job) error {
 // handleInterruption checkpoints every tracked RUNNING job in response to a
 // cloud provider signal, up to maxConcurrentCheckpoints at once. Runs
 // independently of any client connection.
-func (d *Daemon) handleInterruption(trigger string) {
+func (d *Daemon) handleInterruption(sig Signal) {
+	trigger := sig.Trigger
 	// Latched immediately, before anything else: refusing new registrations
 	// matters most in exactly the window this function is about to spend
 	// checkpointing, not after it returns.
@@ -432,6 +458,13 @@ func (d *Daemon) handleInterruption(trigger string) {
 			runnable = append(runnable, j)
 		}
 	}
+
+	// Fired immediately, in parallel with checkpointing below -- never
+	// delayed until the fan-out finishes, so it doesn't eat into the
+	// ~2-minute Spot window. Runs even if there are zero RUNNING jobs: the
+	// signal itself is still worth reporting.
+	d.notify(sig, runnable)
+
 	if len(runnable) == 0 {
 		log.Printf("checkpoint: %s received, no tracked jobs", trigger)
 		return
@@ -453,6 +486,59 @@ func (d *Daemon) handleInterruption(trigger string) {
 	wg.Wait()
 
 	log.Printf("checkpoint: %s complete: %d job(s) processed", trigger, len(runnable))
+}
+
+// notifyPayload is the JSON sent to a configured Notifier. Summary-only by
+// design (job id/status/pid, not full Command/CheckpointDir/hook paths) --
+// avoids handing potentially sensitive command-line arguments or paths to
+// an external target.
+type notifyPayload struct {
+	Trigger    string            `json:"trigger"`
+	DetectedAt time.Time         `json:"detected_at"`
+	Detail     map[string]string `json:"detail,omitempty"`
+	Jobs       []jobSummary      `json:"jobs"`
+}
+
+type jobSummary struct {
+	ID     string       `json:"id"`
+	Status store.Status `json:"status"`
+	PID    int          `json:"pid"`
+}
+
+// notify builds the payload and delivers it via d.notifier, if configured.
+// Runs in its own goroutine so a slow/unreachable external target never
+// blocks or delays the checkpoint fan-out.
+func (d *Daemon) notify(sig Signal, runnable []store.Job) {
+	if d.notifier == nil {
+		return
+	}
+
+	jobs := make([]jobSummary, len(runnable))
+	for i, j := range runnable {
+		jobs[i] = jobSummary{ID: j.ID, Status: j.Status, PID: j.PID}
+	}
+	payload, err := json.Marshal(notifyPayload{
+		Trigger:    sig.Trigger,
+		DetectedAt: time.Now().UTC(),
+		Detail:     sig.Detail,
+		Jobs:       jobs,
+	})
+	if err != nil {
+		log.Printf("notify: failed to build payload: %v", err)
+		return
+	}
+
+	go func() {
+		d.logDaemon("notify_started", "", "ok", sig.Trigger)
+		ctx, cancel := context.WithTimeout(context.Background(), notifyTimeout)
+		defer cancel()
+		if err := d.notifier.Notify(ctx, payload); err != nil {
+			log.Printf("notify: %v", err)
+			d.logDaemon("notify_failed", "", "error", err.Error())
+			return
+		}
+		d.logDaemon("notify_succeeded", "", "ok", "")
+	}()
 }
 
 func (d *Daemon) logDaemon(action, jobID, outcome, detail string) {

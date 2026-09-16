@@ -43,11 +43,14 @@ DBPath=/var/lib/surviva/jobs.db
 | `DBPath` | path | yes, when `DBType=sqlite` | SQLite file `store` opens. |
 | `DBHost`, `DBPort`, `DBUser`, `DBName` | string / positive int / string / string | yes, when `DBType=mysql` | MySQL connection parameters, mirroring `slurmdbd.conf`'s `StorageHost`/`StoragePort`/`StorageUser`/`StorageLoc` pattern. |
 | `DBPassword` | string | no (empty allowed even when `DBType=mysql`) | MySQL password — optional for a passwordless local/dev MySQL instance. |
+| `NotifyTargetType` | string, one of `lambda`, `stepfunction` | no (unset = disabled) | AWS target `daemon` invokes on a Spot interruption/rebalance signal — see `SPEC-daemon.md`. |
+| `NotifyTargetARN` | ARN string | yes, when `NotifyTargetType` is set | The Lambda function or state machine ARN to invoke. Given without `NotifyTargetType` is a load error, not silently ignored. |
 
 The first four are always required — no defaults silently filled in for a
-daemon-critical setting. `DBPath` vs. the four MySQL fields is the one
-directive set whose requiredness depends on another directive
-(`DBType`) — everything else is unconditional.
+daemon-critical setting. `DBPath` vs. the four MySQL fields, and
+`NotifyTargetType`/`NotifyTargetARN`, are the two directive sets whose
+requiredness depends on another directive in the same set — everything
+else is unconditional.
 
 ## API
 
@@ -99,6 +102,9 @@ the actual-file-read path):
 - `DBType=mysql` requires `DBHost`/`DBPort`/`DBUser`/`DBName` individually
   (each missing one is its own load error); `DBPassword` may be absent/empty.
 - `DBType=postgres` (or any other value) is rejected.
+- `NotifyTargetType`/`NotifyTargetARN` both absent → notification disabled,
+  no validation triggered; `NotifyTargetType` set without `NotifyTargetARN`
+  (or vice versa) → rejected; an unsupported `NotifyTargetType` → rejected.
 
 ## Boundaries
 

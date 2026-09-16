@@ -31,6 +31,13 @@ type Config struct {
 	DBUser     string // mysql
 	DBPassword string // mysql, optional (empty allowed)
 	DBName     string // mysql
+
+	// NotifyTargetType selects an optional AWS notification target invoked
+	// the moment daemon detects a Spot interruption/rebalance signal:
+	// "lambda" or "stepfunction". Empty (the default) disables it entirely.
+	// See SPEC-daemon.md for the payload schema.
+	NotifyTargetType string
+	NotifyTargetARN  string
 }
 
 // supportedCloudProviders are recognized directive values for CloudProvider.
@@ -104,12 +111,20 @@ var knownKeys = map[string]bool{
 	"DBUSER":                   true,
 	"DBPASSWORD":               true,
 	"DBNAME":                   true,
+	"NOTIFYTARGETTYPE":         true,
+	"NOTIFYTARGETARN":          true,
 }
 
 // supportedDBTypes are the recognized DBType directive values.
 var supportedDBTypes = map[string]bool{
 	"sqlite": true,
 	"mysql":  true,
+}
+
+// supportedNotifyTargetTypes are the recognized NotifyTargetType values.
+var supportedNotifyTargetTypes = map[string]bool{
+	"lambda":       true,
+	"stepfunction": true,
 }
 
 func validate(path string, raw map[string]string) (Config, error) {
@@ -186,6 +201,25 @@ func validate(path string, raw map[string]string) (Config, error) {
 		if !ok {
 			return Config{}, fmt.Errorf("%s: missing required directive DBName (required when DBType=mysql)", path)
 		}
+	}
+
+	notifyType, hasNotifyType := raw["NOTIFYTARGETTYPE"]
+	notifyARN, hasNotifyARN := raw["NOTIFYTARGETARN"]
+	switch {
+	case !hasNotifyType && !hasNotifyARN:
+		// Notification disabled -- the common case, and every surviva.conf
+		// written before this directive existed.
+	case hasNotifyType && !hasNotifyARN:
+		return Config{}, fmt.Errorf("%s: missing required directive NotifyTargetARN (required when NotifyTargetType is set)", path)
+	case !hasNotifyType && hasNotifyARN:
+		return Config{}, fmt.Errorf("%s: NotifyTargetARN given without NotifyTargetType", path)
+	default:
+		notifyType = strings.ToLower(notifyType)
+		if !supportedNotifyTargetTypes[notifyType] {
+			return Config{}, fmt.Errorf("%s: NotifyTargetType %q is not supported (must be lambda or stepfunction)", path, notifyType)
+		}
+		cfg.NotifyTargetType = notifyType
+		cfg.NotifyTargetARN = notifyARN
 	}
 
 	if maxRaw, ok := raw["MAXCONCURRENTCHECKPOINTS"]; ok {

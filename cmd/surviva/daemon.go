@@ -7,9 +7,12 @@ import (
 	"os"
 	"os/signal"
 
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+
 	"surviva/internal/auditlog"
 	"surviva/internal/config"
 	"surviva/internal/daemon"
+	awsnotify "surviva/internal/daemon/notify/aws"
 	"surviva/internal/daemon/provider/aws"
 	"surviva/internal/ipc"
 	"surviva/internal/sigset"
@@ -63,10 +66,27 @@ func daemonCmd(args []string) int {
 		return 1
 	}
 
+	var notifier daemon.Notifier
+	if cfg.NotifyTargetType != "" {
+		awsCfg, err := awsconfig.LoadDefaultConfig(context.Background())
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "surviva daemon: load AWS config for notify target: %v\n", err)
+			return 1
+		}
+		switch cfg.NotifyTargetType {
+		case "lambda":
+			notifier = awsnotify.NewLambdaNotifier(awsCfg, cfg.NotifyTargetARN)
+		case "stepfunction":
+			notifier = awsnotify.NewStepFunctionNotifier(awsCfg, cfg.NotifyTargetARN)
+		}
+		fmt.Fprintf(os.Stderr, "surviva daemon: notifying %s %s on interruption\n", cfg.NotifyTargetType, cfg.NotifyTargetARN)
+	}
+
 	d := daemon.New(daemon.Config{
 		Store:                    st,
 		Audit:                    al,
 		Provider:                 provider,
+		Notifier:                 notifier,
 		CheckpointBaseDir:        cfg.CheckpointBaseDir,
 		MaxConcurrentCheckpoints: cfg.MaxConcurrentCheckpoints,
 	})

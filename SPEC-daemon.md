@@ -44,15 +44,109 @@ package provider
 // Provider watches for an interruption/rebalance-style signal and calls
 // onSignal (at most once per real signal) until ctx is done.
 type Provider interface {
-    Run(ctx context.Context, onSignal func(trigger string))
+    Run(ctx context.Context, onSignal func(daemon.Signal))
 }
 ```
+
+```go
+// Signal is what a Provider reports on each interruption/rebalance event.
+type Signal struct {
+    Trigger string            // "interruption-notice" | "rebalance-recommendation"
+    Detail  map[string]string // cloud-specific extra context; may be nil
+}
+```
+
+(`Signal` replaces the original bare `trigger string` callback — see
+"Notify a Lambda/Step Function on interruption" below for why: the AWS
+provider needed somewhere to attach instance-id/AZ/action/notice_time for
+the notify payload, without `daemon` itself knowing anything AWS-specific.)
 
 `aws.New(...)` (adapting `legacy/internal/imds`) is the only implementation
 today; `config.CloudProvider == "aws"` selects it (already the only value
 `config.Load` accepts — see `SPEC-config.md`). Azure/GCP become new packages
 implementing the same interface once `config` accepts those values too; no
 change to `daemon`'s own logic when that happens.
+
+## Notify a Lambda/Step Function on interruption
+
+Optional: `daemon` can invoke a user-owned AWS Lambda function or Step
+Functions state machine the instant it detects a Spot interruption/
+rebalance signal, handing it a JSON payload. surviva does none of the
+downstream logic — the user's Lambda/Step Function does whatever it wants
+with the payload (custom recovery orchestration, alerting, anything).
+Considerably lighter than `legacy`'s old approach of surviva itself owning
+a full Step-Functions-based recovery orchestrator.
+
+```go
+// Notifier delivers a JSON payload to an external target. nil means "not
+// configured" -- handleInterruption skips this step entirely.
+type Notifier interface {
+    Notify(ctx context.Context, payload []byte) error
+}
+```
+
+`Config` gains an optional `Notifier`. `handleInterruption` builds the
+payload and — if a `Notifier` is configured — calls `Notify` in its own
+goroutine immediately after latching `interrupted` and listing `RUNNING`
+jobs, **before** the checkpoint fan-out starts and regardless of whether
+there are zero or many `RUNNING` jobs. Firing immediately (not after
+checkpointing finishes) means it never eats into the ~2-minute Spot window;
+running it in its own goroutine means a slow or unreachable external target
+never blocks or delays checkpointing. Bounded by a 10s timeout
+(`notifyTimeout`) — this is a network call to an external AWS API, unlike a
+local CRIU dump, and must not be allowed to hang indefinitely.
+
+Payload (summary-only by design — not full `Command`/`CheckpointDir`/hook
+paths, to avoid handing potentially sensitive command-line arguments or
+paths to an external target):
+
+```json
+{
+  "trigger": "interruption-notice",
+  "detected_at": "2026-09-16T20:00:00Z",
+  "detail": {
+    "instance_id": "i-0123456789abcdef0",
+    "availability_zone": "us-east-1a",
+    "action": "terminate",
+    "notice_time": "2026-09-16T20:02:00Z"
+  },
+  "jobs": [
+    {"id": "1", "status": "RUNNING", "pid": 5806}
+  ]
+}
+```
+
+`detail` is exactly `Signal.Detail`, passed through — for the AWS provider,
+`instance_id`/`availability_zone` come from `imds.Client` (best-effort,
+omitted on failure, never fatal — the same tolerance the rest of the AWS
+integration already gives IMDS calls); `action`/`notice_time` come from
+whichever IMDS signal actually fired. `jobs` is exactly the `RUNNING` list
+`handleInterruption` already computed for the checkpoint fan-out — no
+extra `store` query. Notify success/failure is logged via `audit.Log`
+(`notify_started`/`notify_succeeded`/`notify_failed`), same pattern as
+`checkpoint_started`/etc.
+
+Two implementations, `internal/daemon/notify/aws` (mirrors `provider/aws`'s
+existing shape):
+
+```go
+type LambdaNotifier struct{ client *lambda.Client; arn string }
+func NewLambdaNotifier(cfg aws.Config, arn string) *LambdaNotifier
+// Invoke with InvocationType=Event -- async, fire-and-forget; surviva
+// never waits on or inspects what the user's Lambda actually does.
+
+type StepFunctionNotifier struct{ client *sfn.Client; arn string }
+func NewStepFunctionNotifier(cfg aws.Config, arn string) *StepFunctionNotifier
+// StartExecution -- already async by nature, returns once the execution
+// has started, not when it finishes.
+```
+
+This is the first feature in the redesign needing the real AWS SDK
+(`aws-sdk-go-v2/{config,service/lambda,service/sfn}`) — `internal/imds`
+talks to the metadata service over plain `net/http`, no SDK needed there.
+Credentials load via `awsconfig.LoadDefaultConfig` in
+`cmd/surviva/daemon.go`'s wiring — the same instance-role credential chain
+`legacy` already relied on for S3/DynamoDB.
 
 ## Config addition
 
@@ -64,8 +158,10 @@ existing `surviva.conf` stays valid):
 | Key | Type | Required | Default | Meaning |
 |---|---|---|---|---|
 | `MaxConcurrentCheckpoints` | positive int | no | `runtime.NumCPU()` | Bound on simultaneous CRIU dumps during a fan-out (same rationale as `legacy`: dumping many large process trees fully in parallel can starve disk/CPU badly enough that none finish in time). |
+| `NotifyTargetType` | `lambda` \| `stepfunction` | no (unset = disabled) | — | Selects the notify target — see "Notify a Lambda/Step Function" above. |
+| `NotifyTargetARN` | ARN string | yes, when `NotifyTargetType` is set | — | The Lambda function or state machine ARN to invoke. |
 
-This is the one change to the already-built `config` module this spec
+These are the only changes to the already-built `config` module this spec
 requires; everything else here is new code in `daemon` itself.
 
 ## Job lifecycle operations
@@ -243,6 +339,16 @@ philosophy — real infra over mocks); that part is manual/integration, not
   terminal job's directory, leaves every active job's directory alone, and
   running it a second time in a row is a harmless no-op (nothing left to
   remove, no error).
+- A fake `Notifier` (same swappable-dependency pattern as `checkpointFunc`/
+  `resumeFunc`) capturing its payload: `handleInterruption` calls it with
+  the right trigger/detail/job-summary list when one is configured, fires
+  even when there are zero `RUNNING` jobs (empty `jobs` array, not skipped),
+  and doesn't panic or error when no `Notifier` is configured (`nil`, the
+  default). The real `lambda.Invoke`/`sfn.StartExecution` calls need manual
+  verification against real (temporary) AWS resources — this doesn't need a
+  full EC2 instance the way CRIU does, just real AWS credentials and a
+  throwaway Lambda/state machine with `lambda:InvokeFunction`/
+  `states:StartExecution` granted.
 
 ## Boundaries
 
