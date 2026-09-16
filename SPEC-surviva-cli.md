@@ -116,14 +116,22 @@ restore attempts, interruption detection), per `SPEC-audit-log.md`.
 
 ## Testing Strategy
 
-Flag parsing, request-building, and output-rendering are unit-testable
-against a fake `ipc.Client`-shaped interface (an interface `surviva-cli`
-defines for itself, satisfied by the real `*ipc.Client` and a test fake) —
-verify e.g. `run`'s exit code matches the child's, `join` refuses a
-non-group-leader pid, `list -json` round-trips through `encoding/json`
-correctly. The full loop (start a daemon, run a command against it,
-checkpoint/resume for real) is manual/integration on a real Linux box with
-CRIU, same as `daemon`'s own testing strategy.
+**As implemented, simpler than first specced:** rather than a fake
+`ipc.Client`-shaped interface, each command's non-trivial logic was
+extracted into a small pure function tested directly, without needing a
+daemon connection at all — `exitCodeAndErr` (`run`'s exit-code/message
+computation, exercised via a real re-exec'd subprocess for both a clean and
+a nonzero exit), `buildJoinRequest` (`join`'s group-leader refusal), and
+`renderJobList`/`renderJobDetail` (table and `-json` output, including a
+round-trip through `encoding/json`). Every other command
+(`pause`/`resume`/`cancel`/`prune`) is a straight-line "parse flags, call
+the client, print one line" with no branching worth a dedicated unit test —
+a fake-client interface for those would be untested scaffolding, so it
+wasn't added (see `daemonClient`'s removal from `common.go`: written per
+this spec's original wording, then deleted once nothing used it). The full
+loop (start a daemon, run a command against it, checkpoint/resume for real)
+is manual/integration on a real Linux box with CRIU, same as `daemon`'s own
+testing strategy.
 
 ## Boundaries
 
