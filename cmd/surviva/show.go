@@ -89,6 +89,9 @@ func renderJobDetail(w io.Writer, j store.Job, hist []store.HistoryEntry, asJSON
 	if j.HookResume != "" {
 		fmt.Fprintf(w, "HookResume:      %s\n", j.HookResume)
 	}
+	if j.Tag != "" {
+		fmt.Fprintf(w, "Tag:             %s\n", j.Tag)
+	}
 	if j.FailureReason != "" {
 		fmt.Fprintf(w, "FailureReason:   %s\n", j.FailureReason)
 	}

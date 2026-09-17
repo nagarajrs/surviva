@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net"
 	"os"
+	"os/user"
 	"path/filepath"
 	"runtime"
 	"sync"
@@ -580,6 +582,154 @@ func TestInterruptionFanOutBoundedByMaxConcurrent(t *testing.T) {
 	}
 	if maxSeen < 2 {
 		t.Errorf("max concurrent checkpoints observed = %d, want == 2 (pool should saturate)", maxSeen)
+	}
+}
+
+func TestAdoptRegistersCheckpointCreatedAndResumeWorks(t *testing.T) {
+	d := newTestDaemon(t)
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "inventory.img"))
+
+	resp := d.dispatch(ipc.Request{Action: ipc.ActionAdopt, RequestedBy: "alice", Adopt: &ipc.AdoptCheckpoint{
+		CheckpointDir: dir, Tag: "slurm:123",
+	}})
+	if !resp.OK {
+		t.Fatalf("adopt: %s", resp.Error)
+	}
+	got, err := d.store.Get(resp.JobID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Status != store.StatusCheckpointCreated || got.CheckpointDir != dir || got.Tag != "slurm:123" || got.PID != 0 {
+		t.Errorf("adopted job = %+v, want status=%s dir=%s tag=slurm:123 pid=0", got, store.StatusCheckpointCreated, dir)
+	}
+
+	resumeResp := d.dispatch(ipc.Request{Action: ipc.ActionResume, JobID: resp.JobID})
+	if !resumeResp.OK {
+		t.Fatalf("resume after adopt: %s", resumeResp.Error)
+	}
+	got, _ = d.store.Get(resp.JobID)
+	if got.Status != store.StatusRunning || got.PID != 4242 {
+		t.Errorf("got status=%s pid=%d, want %s / 4242", got.Status, got.PID, store.StatusRunning)
+	}
+}
+
+func TestAdoptRejectsMissingOrInvalidCheckpointDir(t *testing.T) {
+	d := newTestDaemon(t)
+
+	t.Run("empty checkpoint-dir rejected", func(t *testing.T) {
+		resp := d.dispatch(ipc.Request{Action: ipc.ActionAdopt, Adopt: &ipc.AdoptCheckpoint{}})
+		if resp.OK {
+			t.Error("expected adopt with no checkpoint-dir to be rejected")
+		}
+	})
+
+	t.Run("nonexistent dir rejected", func(t *testing.T) {
+		resp := d.dispatch(ipc.Request{Action: ipc.ActionAdopt, Adopt: &ipc.AdoptCheckpoint{
+			CheckpointDir: filepath.Join(t.TempDir(), "does-not-exist"),
+		}})
+		if resp.OK {
+			t.Error("expected adopt with a nonexistent checkpoint-dir to be rejected")
+		}
+	})
+
+	t.Run("dir missing inventory.img rejected without hook-resume", func(t *testing.T) {
+		empty := t.TempDir()
+		resp := d.dispatch(ipc.Request{Action: ipc.ActionAdopt, Adopt: &ipc.AdoptCheckpoint{CheckpointDir: empty}})
+		if resp.OK {
+			t.Error("expected adopt on a dir without inventory.img to be rejected when no hook-resume is given")
+		}
+	})
+
+	t.Run("dir missing inventory.img accepted with hook-resume", func(t *testing.T) {
+		empty := t.TempDir()
+		hook := filepath.Join(t.TempDir(), "resume.sh")
+		if err := os.WriteFile(hook, []byte("#!/bin/sh\necho 1\n"), 0o755); err != nil {
+			t.Fatalf("write hook: %v", err)
+		}
+		if runtime.GOOS == "windows" {
+			t.Skip("executable-bit semantics don't apply on Windows")
+		}
+		resp := d.dispatch(ipc.Request{Action: ipc.ActionAdopt, Adopt: &ipc.AdoptCheckpoint{CheckpointDir: empty, HookResume: hook}})
+		if !resp.OK {
+			t.Errorf("expected adopt with hook-resume to accept a dir without inventory.img: %s", resp.Error)
+		}
+	})
+}
+
+func TestAdoptRejectsDuplicateCheckpointDir(t *testing.T) {
+	d := newTestDaemon(t)
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "inventory.img"))
+
+	first := d.dispatch(ipc.Request{Action: ipc.ActionAdopt, Adopt: &ipc.AdoptCheckpoint{CheckpointDir: dir}})
+	if !first.OK {
+		t.Fatalf("first adopt: %s", first.Error)
+	}
+
+	second := d.dispatch(ipc.Request{Action: ipc.ActionAdopt, Adopt: &ipc.AdoptCheckpoint{CheckpointDir: dir}})
+	if second.OK {
+		t.Fatal("expected second adopt of the same checkpoint-dir to be rejected")
+	}
+}
+
+func TestAdoptRefusedAfterInterrupted(t *testing.T) {
+	d := newTestDaemon(t)
+	d.interrupted.Store(true)
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "inventory.img"))
+
+	resp := d.dispatch(ipc.Request{Action: ipc.ActionAdopt, Adopt: &ipc.AdoptCheckpoint{CheckpointDir: dir}})
+	if resp.OK {
+		t.Fatal("expected adopt to be refused after interruption latch")
+	}
+}
+
+func TestApplySocketGroup(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix group/socket permissions don't apply on Windows")
+	}
+	u, err := user.Current()
+	if err != nil {
+		t.Fatalf("user.Current: %v", err)
+	}
+	g, err := user.LookupGroupId(u.Gid)
+	if err != nil {
+		t.Skipf("no resolvable group for current user's gid %s: %v", u.Gid, err)
+	}
+
+	path := filepath.Join(t.TempDir(), "test.sock")
+	ln, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatalf("net.Listen: %v", err)
+	}
+	defer ln.Close()
+
+	if err := applySocketGroup(path, g.Name); err != nil {
+		t.Fatalf("applySocketGroup: %v", err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("Stat: %v", err)
+	}
+	if info.Mode().Perm() != 0o660 {
+		t.Errorf("mode = %o, want 0660", info.Mode().Perm())
+	}
+}
+
+func TestApplySocketGroupRejectsUnknownGroup(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix group/socket permissions don't apply on Windows")
+	}
+	path := filepath.Join(t.TempDir(), "test.sock")
+	ln, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatalf("net.Listen: %v", err)
+	}
+	defer ln.Close()
+
+	if err := applySocketGroup(path, "surviva-group-that-should-not-exist"); err == nil {
+		t.Fatal("expected an error for a nonexistent group")
 	}
 }
 

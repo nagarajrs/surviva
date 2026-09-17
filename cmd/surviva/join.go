@@ -21,6 +21,7 @@ func joinCmd(args []string) int {
 	hookCheckpoint := fs.String("hook-checkpoint", "", "path to a custom checkpoint script (used instead of criu)")
 	hookResume := fs.String("hook-resume", "", "path to a custom resume script (used instead of criu restore)")
 	checkpointDir := fs.String("checkpoint-dir", "", "override where this job's checkpoint is written (default: daemon-computed)")
+	tag := fs.String("tag", "", "external identifier to correlate this job with (e.g. $SLURM_JOB_ID)")
 	socketPath := fs.String("socket", ipc.DefaultSocketPath(), "path to the surviva daemon socket")
 	confPath := fs.String("conf", config.DefaultPath(), "path to surviva.conf (for audit logging)")
 	_ = fs.Parse(args)
@@ -43,7 +44,7 @@ func joinCmd(args []string) int {
 		defer al.Close()
 	}
 
-	req, err := buildJoinRequest(pid, *checkpointDir, *hookCheckpoint, *hookResume)
+	req, err := buildJoinRequest(pid, *checkpointDir, *hookCheckpoint, *hookResume, *tag)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "surviva join: %v\n", err)
 		logCLI(al, "join", "", "error", err.Error())
@@ -65,7 +66,7 @@ func joinCmd(args []string) int {
 
 // buildJoinRequest is the testable core of joinCmd: the process-group
 // safety check plus best-effort Command/WorkDir enrichment.
-func buildJoinRequest(pid int, checkpointDir, hookCheckpoint, hookResume string) (ipc.RegisterJob, error) {
+func buildJoinRequest(pid int, checkpointDir, hookCheckpoint, hookResume, tag string) (ipc.RegisterJob, error) {
 	isLeader, err := procgroup.IsGroupLeader(pid)
 	if err != nil {
 		return ipc.RegisterJob{}, fmt.Errorf("check process group for pid %d: %w", pid, err)
@@ -84,5 +85,6 @@ func buildJoinRequest(pid int, checkpointDir, hookCheckpoint, hookResume string)
 		CheckpointDir:  checkpointDir,
 		HookCheckpoint: hookCheckpoint,
 		HookResume:     hookResume,
+		Tag:            tag,
 	}, nil
 }

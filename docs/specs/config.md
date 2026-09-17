@@ -45,6 +45,7 @@ DBPath=/var/lib/surviva/jobs.db
 | `DBPassword` | string | no (empty allowed even when `DBType=mysql`) | MySQL password — optional for a passwordless local/dev MySQL instance. |
 | `NotifyTargetType` | string, one of `lambda`, `stepfunction` | no (unset = disabled) | AWS target `daemon` invokes on a Spot interruption/rebalance signal — see [daemon.md](daemon.md). |
 | `NotifyTargetARN` | ARN string | yes, when `NotifyTargetType` is set | The Lambda function or state machine ARN to invoke. Given without `NotifyTargetType` is a load error, not silently ignored. |
+| `SocketGroup` | group name | no (unset = socket keeps `net.Listen`'s default permissions, root-only in practice) | Group `daemon` chowns its Unix socket to (mode `0660`) at startup, so non-root callers in that group can connect without `sudo`. Not validated here — see below. |
 
 The first four are always required — no defaults silently filled in for a
 daemon-critical setting. `DBPath` vs. the four MySQL fields, and
@@ -69,6 +70,11 @@ type Config struct {
     DBUser     string // mysql
     DBPassword string // mysql, optional
     DBName     string // mysql
+
+    NotifyTargetType string // "lambda" or "stepfunction", optional
+    NotifyTargetARN  string
+
+    SocketGroup string // optional; see daemon.md for what it does
 }
 
 func Load(path string) (Config, error)
@@ -108,6 +114,21 @@ the actual-file-read path):
   warning to stderr (`chmod 600` on it silences it); the same file with no
   `DBPassword`, or any file at `0600`, is silent. Skipped on Windows, where
   the permission bits being checked don't carry the same meaning.
+- `SocketGroup` absent defaults to `""` (unset); present is read back
+  verbatim, with no existence check at this layer (see below).
+
+## `SocketGroup` — deliberately not validated at load time
+
+Unlike every other directive, `Load` does not check that the named group
+actually exists. Reason: `config.Load` is called by every `surviva-cli`
+command (via `openAuditLogger`), not just `surviva daemon` — if `Load`
+rejected an unresolvable `SocketGroup`, a typo'd group name would break
+`surviva run`/`list`/`show`/etc., not just the daemon startup it's actually
+relevant to. The group lookup (`os/user.LookupGroup`) and the actual
+`chown`/`chmod` of the socket happen in `daemon.Run`, the one place this
+directive means anything — see [daemon.md](daemon.md)'s Wire protocol /
+socket section. A bad `SocketGroup` therefore fails loudly at `surviva
+daemon` startup, exactly where it matters, and nowhere else.
 
 ## Config-file permissions
 
