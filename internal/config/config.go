@@ -39,6 +39,14 @@ type Config struct {
 	// See docs/specs/daemon.md for the payload schema.
 	NotifyTargetType string
 	NotifyTargetARN  string
+
+	// SocketGroup optionally names a group that should be able to connect
+	// to the daemon's Unix socket. Empty (the default) leaves the socket at
+	// whatever permissions net.Listen gives it -- root-only in practice,
+	// since daemon itself runs as root. Set this when non-root callers
+	// (e.g. a Slurm job step running as the submitting user) need direct
+	// access instead of going through sudo. See docs/specs/daemon.md.
+	SocketGroup string
 }
 
 // supportedCloudProviders are recognized directive values for CloudProvider.
@@ -139,6 +147,7 @@ var knownKeys = map[string]bool{
 	"DBNAME":                   true,
 	"NOTIFYTARGETTYPE":         true,
 	"NOTIFYTARGETARN":          true,
+	"SOCKETGROUP":              true,
 }
 
 // supportedDBTypes are the recognized DBType directive values.
@@ -255,6 +264,13 @@ func validate(path string, raw map[string]string) (Config, error) {
 		}
 		cfg.MaxConcurrentCheckpoints = n
 	}
+
+	// Not validated here (e.g. that the group actually exists) -- every CLI
+	// command loads config too (see cmd/surviva.openAuditLogger), and this
+	// directive is only meaningful to `surviva daemon`. Resolving it there,
+	// not here, means a typo'd SocketGroup only ever breaks the daemon
+	// startup it actually affects, not every unrelated CLI invocation.
+	cfg.SocketGroup = raw["SOCKETGROUP"]
 
 	return cfg, nil
 }

@@ -106,6 +106,7 @@ type Job struct {
 	Status         Status
 	FailureReason  string
 	Owner          string // OS user who ran `surviva run`/`join`, captured at registration
+	Tag            string // optional external identifier (e.g. $SLURM_JOB_ID); surviva never interprets it
 	RegisteredAt   time.Time
 	UpdatedAt      time.Time
 }
@@ -133,6 +134,7 @@ CREATE TABLE IF NOT EXISTS jobs (
 	status          TEXT NOT NULL,
 	failure_reason  TEXT NOT NULL DEFAULT '',
 	owner           TEXT NOT NULL DEFAULT '',
+	tag             TEXT NOT NULL DEFAULT '',
 	registered_at   DATETIME NOT NULL,
 	updated_at      DATETIME NOT NULL
 );
@@ -166,6 +168,7 @@ CREATE TABLE IF NOT EXISTS jobs (
 	status          VARCHAR(64) NOT NULL,
 	failure_reason  TEXT NOT NULL,
 	owner           VARCHAR(255) NOT NULL,
+	tag             VARCHAR(255) NOT NULL,
 	registered_at   DATETIME NOT NULL,
 	updated_at      DATETIME NOT NULL
 );
@@ -254,6 +257,10 @@ func Open(opts Options) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("migrate schema: %w", err)
 	}
+	if err := addColumnIfMissing(db, driver, "jobs", "tag", "TEXT NOT NULL DEFAULT ''", "VARCHAR(255) NOT NULL DEFAULT ''"); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate schema: %w", err)
+	}
 	return &Store{db: db}, nil
 }
 
@@ -324,9 +331,9 @@ func (s *Store) Insert(j Job) (string, error) {
 		return "", fmt.Errorf("marshal command: %w", err)
 	}
 	res, err := s.db.Exec(
-		`INSERT INTO jobs (pid, pgid, checkpoint_dir, command, work_dir, hook_checkpoint, hook_resume, status, failure_reason, owner, registered_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		j.PID, j.PGID, j.CheckpointDir, string(cmdJSON), j.WorkDir, j.HookCheckpoint, j.HookResume, string(j.Status), j.FailureReason, j.Owner, j.RegisteredAt, j.UpdatedAt,
+		`INSERT INTO jobs (pid, pgid, checkpoint_dir, command, work_dir, hook_checkpoint, hook_resume, status, failure_reason, owner, tag, registered_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		j.PID, j.PGID, j.CheckpointDir, string(cmdJSON), j.WorkDir, j.HookCheckpoint, j.HookResume, string(j.Status), j.FailureReason, j.Owner, j.Tag, j.RegisteredAt, j.UpdatedAt,
 	)
 	if err != nil {
 		return "", fmt.Errorf("insert job: %w", err)
@@ -345,7 +352,7 @@ func (s *Store) Get(id string) (Job, error) {
 		return Job{}, err
 	}
 	row := s.db.QueryRow(
-		`SELECT id, pid, pgid, checkpoint_dir, command, work_dir, hook_checkpoint, hook_resume, status, failure_reason, owner, registered_at, updated_at
+		`SELECT id, pid, pgid, checkpoint_dir, command, work_dir, hook_checkpoint, hook_resume, status, failure_reason, owner, tag, registered_at, updated_at
 		 FROM jobs WHERE id = ?`, idInt,
 	)
 	return scanJob(row)
@@ -354,7 +361,7 @@ func (s *Store) Get(id string) (Job, error) {
 // List returns every active (non-terminal) job. Backs `surviva list`.
 func (s *Store) List() ([]Job, error) {
 	rows, err := s.db.Query(
-		`SELECT id, pid, pgid, checkpoint_dir, command, work_dir, hook_checkpoint, hook_resume, status, failure_reason, owner, registered_at, updated_at
+		`SELECT id, pid, pgid, checkpoint_dir, command, work_dir, hook_checkpoint, hook_resume, status, failure_reason, owner, tag, registered_at, updated_at
 		 FROM jobs WHERE status NOT IN (?, ?, ?) ORDER BY registered_at ASC`,
 		string(StatusFailed), string(StatusCanceled), string(StatusCompleted),
 	)
@@ -379,7 +386,7 @@ func (s *Store) List() ([]Job, error) {
 // find every terminal job's CheckpointDir without touching active jobs.
 func (s *Store) ListTerminal() ([]Job, error) {
 	rows, err := s.db.Query(
-		`SELECT id, pid, pgid, checkpoint_dir, command, work_dir, hook_checkpoint, hook_resume, status, failure_reason, owner, registered_at, updated_at
+		`SELECT id, pid, pgid, checkpoint_dir, command, work_dir, hook_checkpoint, hook_resume, status, failure_reason, owner, tag, registered_at, updated_at
 		 FROM jobs WHERE status IN (?, ?, ?) ORDER BY registered_at ASC`,
 		string(StatusFailed), string(StatusCanceled), string(StatusCompleted),
 	)
@@ -569,7 +576,7 @@ func scanJob(row rowScanner) (Job, error) {
 		cmdJSON string
 		status  string
 	)
-	if err := row.Scan(&id, &j.PID, &j.PGID, &j.CheckpointDir, &cmdJSON, &j.WorkDir, &j.HookCheckpoint, &j.HookResume, &status, &j.FailureReason, &j.Owner, &j.RegisteredAt, &j.UpdatedAt); err != nil {
+	if err := row.Scan(&id, &j.PID, &j.PGID, &j.CheckpointDir, &cmdJSON, &j.WorkDir, &j.HookCheckpoint, &j.HookResume, &status, &j.FailureReason, &j.Owner, &j.Tag, &j.RegisteredAt, &j.UpdatedAt); err != nil {
 		return Job{}, fmt.Errorf("scan job row: %w", err)
 	}
 	j.ID = strconv.FormatInt(id, 10)

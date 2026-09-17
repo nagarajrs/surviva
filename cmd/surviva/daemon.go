@@ -89,6 +89,7 @@ func daemonCmd(args []string) int {
 		Notifier:                 notifier,
 		CheckpointBaseDir:        cfg.CheckpointBaseDir,
 		MaxConcurrentCheckpoints: cfg.MaxConcurrentCheckpoints,
+		SocketGroup:              cfg.SocketGroup,
 	})
 
 	ctx, stop := signal.NotifyContext(context.Background(), sigset.TermSignals()...)

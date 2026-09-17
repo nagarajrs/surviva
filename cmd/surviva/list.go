@@ -21,6 +21,7 @@ func listCmd(args []string) int {
 	socketPath := fs.String("socket", ipc.DefaultSocketPath(), "path to the surviva daemon socket")
 	confPath := fs.String("conf", config.DefaultPath(), "path to surviva.conf (for audit logging)")
 	asJSON := fs.Bool("json", false, "print raw JSON instead of a table")
+	tag := fs.String("tag", "", "only show jobs matching this external tag")
 	_ = fs.Parse(args)
 
 	al, err := openAuditLogger(*confPath)
@@ -37,8 +38,23 @@ func listCmd(args []string) int {
 		logCLI(al, "list", "", "error", err.Error())
 		return 1
 	}
+	if *tag != "" {
+		jobs = filterByTag(jobs, *tag)
+	}
 	logCLI(al, "list", "", "ok", "")
 	return renderJobList(os.Stdout, jobs, *asJSON)
+}
+
+// filterByTag keeps only jobs whose Tag matches exactly. A daemon tracks at
+// most a handful of jobs, so a linear scan needs no server-side query.
+func filterByTag(jobs []store.Job, tag string) []store.Job {
+	var out []store.Job
+	for _, j := range jobs {
+		if j.Tag == tag {
+			out = append(out, j)
+		}
+	}
+	return out
 }
 
 func renderJobList(w io.Writer, jobs []store.Job, asJSON bool) int {
@@ -58,9 +74,9 @@ func renderJobList(w io.Writer, jobs []store.Job, asJSON bool) int {
 	}
 
 	tw := tabwriter.NewWriter(w, 0, 2, 2, ' ', 0)
-	fmt.Fprintln(tw, "JOB ID\tPID\tSTATUS\tDURATION\tCOMMAND")
+	fmt.Fprintln(tw, "JOB ID\tPID\tSTATUS\tDURATION\tTAG\tCOMMAND")
 	for _, j := range jobs {
-		fmt.Fprintf(tw, "%s\t%d\t%s\t%s\t%s\n", j.ID, j.PID, j.Status, jobDuration(j), strings.Join(j.Command, " "))
+		fmt.Fprintf(tw, "%s\t%d\t%s\t%s\t%s\t%s\n", j.ID, j.PID, j.Status, jobDuration(j), j.Tag, strings.Join(j.Command, " "))
 	}
 	tw.Flush()
 	return 0

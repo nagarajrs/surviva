@@ -318,6 +318,24 @@ func TestLoadNotifyTargetInvalidType(t *testing.T) {
 	}
 }
 
+func TestLoadSocketGroupOptional(t *testing.T) {
+	cfg, err := Load(writeConf(t, validConf))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.SocketGroup != "" {
+		t.Errorf("SocketGroup = %q, want empty (unset)", cfg.SocketGroup)
+	}
+
+	cfg, err = Load(writeConf(t, validConf+"\nSocketGroup=surviva\n"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.SocketGroup != "surviva" {
+		t.Errorf("SocketGroup = %q, want %q", cfg.SocketGroup, "surviva")
+	}
+}
+
 func TestLoadUnrecognizedProvider(t *testing.T) {
 	path := writeConf(t, `
 CloudProvider=digitalocean

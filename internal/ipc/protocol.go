@@ -24,6 +24,7 @@ const (
 	ActionCancel   Action = "cancel"
 	ActionComplete Action = "complete"
 	ActionPrune    Action = "prune"
+	ActionAdopt    Action = "adopt"
 )
 
 // RegisterJob is the payload for ActionRegister -- backs both a future
@@ -37,13 +38,27 @@ type RegisterJob struct {
 	CheckpointDir  string   `json:"checkpoint_dir,omitempty"` // optional override; daemon computes the default if empty
 	HookCheckpoint string   `json:"hook_checkpoint,omitempty"`
 	HookResume     string   `json:"hook_resume,omitempty"`
+	Tag            string   `json:"tag,omitempty"` // optional external identifier (e.g. $SLURM_JOB_ID); surviva never interprets it
+}
+
+// AdoptCheckpoint is the payload for ActionAdopt: register a job directly
+// against a pre-existing checkpoint that some other surviva-daemon instance
+// (often on a since-terminated machine) already produced, so this daemon can
+// `resume` it. There is no live process yet -- PID/PGID stay 0 until a
+// subsequent successful `surviva resume`.
+type AdoptCheckpoint struct {
+	CheckpointDir  string `json:"checkpoint_dir"`
+	HookResume     string `json:"hook_resume,omitempty"`
+	HookCheckpoint string `json:"hook_checkpoint,omitempty"`
+	Tag            string `json:"tag,omitempty"`
 }
 
 // Request is one client -> daemon message.
 type Request struct {
-	Action Action       `json:"action"`
-	Job    *RegisterJob `json:"job,omitempty"`
-	JobID  string       `json:"job_id,omitempty"` // Show/Pause/Resume/Cancel/Complete/Prune (Prune: empty means "all terminal jobs")
+	Action Action           `json:"action"`
+	Job    *RegisterJob     `json:"job,omitempty"`
+	Adopt  *AdoptCheckpoint `json:"adopt,omitempty"`
+	JobID  string           `json:"job_id,omitempty"` // Show/Pause/Resume/Cancel/Complete/Prune (Prune: empty means "all terminal jobs")
 	// RequestedBy is the OS user running the CLI, captured by surviva-cli
 	// (see cmd/surviva.currentOSUser) for Register/Pause/Resume/Cancel/
 	// Complete. Recorded as store.Job.Owner (Register) and

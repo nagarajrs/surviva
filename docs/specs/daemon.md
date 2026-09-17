@@ -250,6 +250,37 @@ visible via `show`, per `store`'s "no automatic pruning of history" stance):
   checkpoint was already cleaned by hand) is harmless — no new `store` field
   needed to track "already pruned."
 
+**Adopt** (backs `surviva adopt -checkpoint-dir <path>` — register a job
+directly against a checkpoint some *other* surviva-daemon instance already
+produced, typically on a since-terminated machine, reachable here because
+`CheckpointDir` sits on shared/network storage):
+1. Refused if the interruption latch is set, same as Register.
+2. `CheckpointDir` is required (not optional-with-a-computed-default, unlike
+   Register) and validated: must exist, be a directory, and — when no
+   `HookResume` is given — contain CRIU's own `inventory.img` marker, so a
+   typo'd path or a directory that never held a real `criu dump` is caught
+   now rather than on the first `resume`. A `HookResume`-owned directory's
+   layout is opaque to surviva by design (see [hooks.md](hooks.md)), so only
+   existence is checked in that case. Hook paths themselves go through the
+   same `validateHookPath` as Register.
+3. Rejects if any currently-active job already has this `CheckpointDir` —
+   guards against adopting the same checkpoint twice.
+4. `store.Insert(Job{CheckpointDir, HookCheckpoint, HookResume, Tag, Status: CHECKPOINT_CREATED, Owner: req.RequestedBy})`
+   — `PID`/`PGID`/`Command` are left zero/empty; there is no live process
+   until a subsequent `surviva resume` succeeds. This is a plain `Insert`,
+   not a special case: `store.Insert` has no transition check (see
+   [store.md](store.md)), so writing a fresh row straight into
+   `CHECKPOINT_CREATED` is already legal, and the existing Resume handling
+   below needs no changes to act on it.
+
+A separate `ActionAdopt`/`handleAdopt` rather than a flag on Register: the
+two operations' invariants are structurally incompatible (live PID required
+vs. none yet; checkpoint dir optional-with-a-default vs.
+required-and-pre-existing) — matching every other daemon operation already
+getting its own action/handler even where the underlying work is shared
+(here, that reuse happens at the `resumeJob`/`resume.Run`/`validateHookPath`
+function level, not by branching inside one handler).
+
 `daemon` does **not** write its own audit-log entry for "a Register/Pause/
 Resume/Cancel/Show/List/Prune request arrived" — that's `surviva-cli`'s job
 to log about itself (`component: "cli"`). `daemon` only logs its own
@@ -280,6 +311,7 @@ const (
     ActionCancel   Action = "cancel"
     ActionComplete Action = "complete"
     ActionPrune    Action = "prune"
+    ActionAdopt    Action = "adopt"
 )
 
 type RegisterJob struct {
@@ -290,16 +322,28 @@ type RegisterJob struct {
     CheckpointDir  string // optional override; daemon computes the default if empty
     HookCheckpoint string
     HookResume     string
+    Tag            string // optional external identifier (e.g. $SLURM_JOB_ID); surviva never interprets it
+}
+
+// AdoptCheckpoint is the payload for ActionAdopt: register a job directly
+// against a pre-existing checkpoint another surviva-daemon instance already
+// produced. No live process yet -- PID/PGID stay 0 until Resume succeeds.
+type AdoptCheckpoint struct {
+    CheckpointDir  string // required; must already exist and look resumable
+    HookResume     string // required if CheckpointDir holds hook-produced state, not criu images
+    HookCheckpoint string // optional, for if this job is checkpointed again after resuming
+    Tag            string
 }
 
 type Request struct {
     Action         Action
-    Job            *RegisterJob // Register
-    JobID          string       // Show/Pause/Resume/Cancel/Complete/Prune (Prune: empty means "all terminal jobs")
-    RequestedBy    string       // Register/Pause/Resume/Cancel/Complete: the OS user running the CLI (see surviva-cli.md)
-    IncludeHistory bool         // Show: also return the job's full status-change history
-    ExitCode       int          // Complete
-    ErrMsg         string       // Complete, optional
+    Job            *RegisterJob     // Register
+    Adopt          *AdoptCheckpoint // Adopt
+    JobID          string           // Show/Pause/Resume/Cancel/Complete/Prune (Prune: empty means "all terminal jobs")
+    RequestedBy    string           // Register/Adopt/Pause/Resume/Cancel/Complete: the OS user running the CLI (see surviva-cli.md)
+    IncludeHistory bool             // Show: also return the job's full status-change history
+    ExitCode       int              // Complete
+    ErrMsg         string           // Complete, optional
 }
 
 type Response struct {
@@ -318,6 +362,27 @@ Transport: Unix domain socket, one JSON object per line, one goroutine per
 connection (`go handleConn(conn)`) so a slow `Pause`/`Resume` on one
 connection never blocks another client's `List`/`Show`. Socket path:
 `SURVIVA_SOCKET` env var, with a per-OS default (`ipc.DefaultSocketPath()`).
+
+**Socket permissions.** `daemon` runs as root (CRIU needs broad kernel
+privileges), so by default the socket `net.Listen` creates is effectively
+root-only — any `surviva-cli` invocation from a non-root user gets
+`connect: permission denied`. Set `SocketGroup` in `surviva.conf` (see
+[config.md](config.md)) to let a specific group connect instead: right
+after `net.Listen` succeeds, `Run` resolves the group via
+`os/user.LookupGroup`, `os.Chown`s the socket file to that GID (owner
+unchanged), and `os.Chmod`s it `0660`. A group member can then read/write
+the socket without `sudo`; anyone outside owner/group still cannot. This
+matters most for schedulers like Slurm, where a job step runs as the
+submitting user, not root — see the surviva-slurm project's own
+Slurm-specific setup doc for the concrete group/membership steps.
+
+Resolving the group at `Run` time (not in `config.Load`) is deliberate:
+`Load` is called by every CLI command, and a typo'd `SocketGroup` should
+only ever break `surviva daemon` startup, not every unrelated `surviva
+run`/`list`/`show` invocation. An unresolvable group is a hard failure —
+`daemon.Run` returns an error and the daemon does not start — since a
+silently-ignored bad group would leave the socket root-only with no
+indication why non-root callers keep failing.
 
 ## Testing Strategy
 

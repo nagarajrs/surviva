@@ -50,6 +50,7 @@ type Job struct {
     Status         Status
     FailureReason  string // set on FAILED/CHECKPOINT_CREATION_FAILED/RESTORE_FAILED, empty otherwise
     Owner          string // OS user who ran `surviva run`/`join`, captured at registration
+    Tag            string // optional external identifier (e.g. $SLURM_JOB_ID); surviva never interprets it
     RegisteredAt   time.Time
     UpdatedAt      time.Time
 }
@@ -115,6 +116,16 @@ RESTORE_FAILED ──cancel────────> CANCELED
 `Store` enforces this table (`ValidTransition(from, to Status) bool`); an
 invalid transition is a caller bug, not a recoverable runtime condition, so
 `UpdateStatus` returns an error rather than silently applying it.
+
+**`Insert` itself is not gated by this table** — it writes whatever `Status`
+the caller hands it, with no `ValidTransition` check (only `UpdateStatus`/
+`UpdatePID` enforce transitions, and only against an *existing* row). This is
+what lets `daemon`'s `adopt` operation insert a brand-new job directly at
+`CHECKPOINT_CREATED` — registering a checkpoint some other surviva-daemon
+instance already produced, with no live `PID` yet — without needing a new
+"initial state" concept here: from `store`'s point of view it's an ordinary
+`Insert`, and the existing `CHECKPOINT_CREATED → RESTORE_PENDING → RUNNING`
+transitions carry it the rest of the way once `surviva resume` is called.
 
 ## Pluggable backend (SQLite default, MySQL optional)
 
@@ -209,11 +220,13 @@ never adds a missing column. `Open` runs one small migration after applying
 the schema: `ALTER TABLE jobs ADD COLUMN owner ...` (per-dialect type), but
 only if the column isn't already there (checked via `PRAGMA table_info`
 for sqlite, `information_schema.columns` for mysql) — so a fresh database
-and a fresh column both leave `Open` idempotent. This is deliberately the
-minimal fix for the one column that needs it, not a general migrations
-framework (versioned migration files, a schema-version table) — add one if
-a second such column ever needs backfilling and this stops being a
-one-off.
+and a fresh column both leave `Open` idempotent. `jobs.tag` followed the exact
+same pattern when it was added later (`addColumnIfMissing(db, driver, "jobs",
+"tag", ...)`, run right after the `owner` backfill), which is what
+`addColumnIfMissing` was written generically enough to support — not a
+general migrations framework (versioned migration files, a schema-version
+table), just the same minimal one-`ALTER TABLE`-per-column fix reused for a
+second column.
 
 `Get`/`UpdateStatus`/`UpdatePID`/`UpdateCheckpointDir` all parse `id` into an
 integer before querying (a job id that isn't a plain number is rejected with

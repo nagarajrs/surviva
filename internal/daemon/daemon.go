@@ -10,8 +10,10 @@ import (
 	"log"
 	"net"
 	"os"
+	"os/user"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -63,6 +65,10 @@ type Config struct {
 	Notifier                 Notifier // optional; nil disables notification
 	CheckpointBaseDir        string
 	MaxConcurrentCheckpoints int // <= 0 defaults to runtime.NumCPU()
+	// SocketGroup optionally names a group to own the daemon's Unix socket
+	// (mode 0660) instead of leaving it at net.Listen's default. Empty
+	// disables this -- the socket keeps its default permissions.
+	SocketGroup string
 }
 
 // Daemon owns the job store, the audit log, and the cloud-signal provider.
@@ -73,6 +79,7 @@ type Daemon struct {
 	notifier                 Notifier
 	checkpointBaseDir        string
 	maxConcurrentCheckpoints int
+	socketGroup              string
 
 	// interrupted latches true the moment a rebalance recommendation or
 	// interruption notice is ever received (see handleInterruption). A job
@@ -100,6 +107,7 @@ func New(cfg Config) *Daemon {
 		notifier:                 cfg.Notifier,
 		checkpointBaseDir:        cfg.CheckpointBaseDir,
 		maxConcurrentCheckpoints: max,
+		socketGroup:              cfg.SocketGroup,
 		checkpointFunc:           checkpoint.Run,
 		resumeFunc:               resume.Run,
 	}
@@ -118,6 +126,12 @@ func (d *Daemon) Run(ctx context.Context, socketPath string) error {
 		return fmt.Errorf("listen on %s: %w", socketPath, err)
 	}
 	defer ln.Close()
+
+	if d.socketGroup != "" {
+		if err := applySocketGroup(socketPath, d.socketGroup); err != nil {
+			return fmt.Errorf("apply SocketGroup: %w", err)
+		}
+	}
 
 	go d.provider.Run(ctx, d.handleInterruption)
 
@@ -139,6 +153,29 @@ func (d *Daemon) Run(ctx context.Context, socketPath string) error {
 		}
 		go d.handleConn(conn)
 	}
+}
+
+// applySocketGroup chowns socketPath to group's GID (leaving its owner
+// unchanged) and chmods it 0660, so members of group can connect to the
+// daemon without needing to be root. Fails loudly -- a typo'd or
+// nonexistent group at daemon startup is a deployment error worth stopping
+// on, not silently leaving the socket root-only.
+func applySocketGroup(socketPath, group string) error {
+	g, err := user.LookupGroup(group)
+	if err != nil {
+		return fmt.Errorf("lookup group %q: %w", group, err)
+	}
+	gid, err := strconv.Atoi(g.Gid)
+	if err != nil {
+		return fmt.Errorf("group %q has non-numeric gid %q: %w", group, g.Gid, err)
+	}
+	if err := os.Chown(socketPath, -1, gid); err != nil {
+		return fmt.Errorf("chown %s to group %q: %w", socketPath, group, err)
+	}
+	if err := os.Chmod(socketPath, 0o660); err != nil {
+		return fmt.Errorf("chmod %s: %w", socketPath, err)
+	}
+	return nil
 }
 
 func (d *Daemon) handleConn(conn net.Conn) {
@@ -176,6 +213,8 @@ func (d *Daemon) dispatch(req ipc.Request) ipc.Response {
 		return d.handleComplete(req)
 	case ipc.ActionPrune:
 		return d.handlePrune(req)
+	case ipc.ActionAdopt:
+		return d.handleAdopt(req)
 	default:
 		return ipc.Response{OK: false, Error: fmt.Sprintf("unknown action %q", req.Action)}
 	}
@@ -206,6 +245,7 @@ func (d *Daemon) handleRegister(req ipc.Request) ipc.Response {
 		HookResume:     req.Job.HookResume,
 		Status:         store.StatusRunning,
 		Owner:          req.RequestedBy,
+		Tag:            req.Job.Tag,
 		RegisteredAt:   now,
 		UpdatedAt:      now,
 	}
@@ -222,6 +262,91 @@ func (d *Daemon) handleRegister(req ipc.Request) ipc.Response {
 		}
 	}
 	return ipc.Response{OK: true, JobID: id}
+}
+
+// handleAdopt registers a brand-new job directly against a checkpoint some
+// other surviva-daemon instance already produced (e.g. on a since-terminated
+// machine, with the checkpoint dir on shared/network storage this daemon can
+// also reach). The resulting row starts life in CHECKPOINT_CREATED -- Insert
+// has no transition check, so this is legal -- and `surviva resume` against
+// its assigned id works completely unmodified from there.
+func (d *Daemon) handleAdopt(req ipc.Request) ipc.Response {
+	if req.Adopt == nil {
+		return ipc.Response{OK: false, Error: "missing adopt payload"}
+	}
+	if d.interrupted.Load() {
+		return ipc.Response{OK: false, Error: "daemon has already received an interruption signal; refusing new registrations"}
+	}
+	a := req.Adopt
+	if a.CheckpointDir == "" {
+		return ipc.Response{OK: false, Error: "checkpoint-dir is required for adopt"}
+	}
+	if err := validateCheckpointDir(a.CheckpointDir, a.HookResume); err != nil {
+		return ipc.Response{OK: false, Error: err.Error()}
+	}
+	if err := validateHookPath("hook-checkpoint", a.HookCheckpoint); err != nil {
+		return ipc.Response{OK: false, Error: err.Error()}
+	}
+	if err := validateHookPath("hook-resume", a.HookResume); err != nil {
+		return ipc.Response{OK: false, Error: err.Error()}
+	}
+
+	// ponytail: TOCTOU between this scan and Insert below -- two concurrent
+	// adopts of the same dir can both pass. Acceptable for v1 (adopt is a
+	// one-shot script call, not a hot path); upgrade path is wrapping
+	// check+insert in one store transaction if concurrent double-adopt shows
+	// up in practice.
+	active, err := d.store.List()
+	if err != nil {
+		return ipc.Response{OK: false, Error: err.Error()}
+	}
+	for _, ej := range active {
+		if ej.CheckpointDir == a.CheckpointDir {
+			return ipc.Response{OK: false, Error: fmt.Sprintf(
+				"checkpoint-dir %q is already tracked by active job %s (status %s); refusing duplicate adopt",
+				a.CheckpointDir, ej.ID, ej.Status)}
+		}
+	}
+
+	now := time.Now().UTC()
+	id, err := d.store.Insert(store.Job{
+		CheckpointDir:  a.CheckpointDir,
+		HookCheckpoint: a.HookCheckpoint,
+		HookResume:     a.HookResume,
+		Tag:            a.Tag,
+		Status:         store.StatusCheckpointCreated,
+		Owner:          req.RequestedBy,
+		RegisteredAt:   now,
+		UpdatedAt:      now,
+	})
+	if err != nil {
+		return ipc.Response{OK: false, Error: err.Error()}
+	}
+	return ipc.Response{OK: true, JobID: id}
+}
+
+// validateCheckpointDir rejects an adopt request whose checkpoint dir
+// doesn't look resumable: must exist, be a directory, and -- when no
+// hook-resume is registered (plain criu will restore it) -- contain criu's
+// own inventory.img marker, so a typo'd path or a directory that never held
+// a real `criu dump` is caught now, not on the first `surviva resume`. A
+// hook-resume-owned directory's layout is opaque to surviva by design (see
+// docs/specs/hooks.md), so only existence is checked in that case.
+func validateCheckpointDir(dir, hookResume string) error {
+	info, err := os.Stat(dir)
+	if err != nil {
+		return fmt.Errorf("checkpoint-dir %q: %w", dir, err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("checkpoint-dir %q: not a directory", dir)
+	}
+	if hookResume != "" {
+		return nil
+	}
+	if _, err := os.Stat(filepath.Join(dir, "inventory.img")); err != nil {
+		return fmt.Errorf("checkpoint-dir %q: does not look like a criu images directory (missing inventory.img); pass -hook-resume if this was produced by a custom checkpoint hook", dir)
+	}
+	return nil
 }
 
 // validateHookPath rejects a non-empty hook path that isn't a regular,

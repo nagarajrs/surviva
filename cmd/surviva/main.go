@@ -19,6 +19,8 @@ func main() {
 		code = runCmd(os.Args[2:])
 	case "join":
 		code = joinCmd(os.Args[2:])
+	case "adopt":
+		code = adoptCmd(os.Args[2:])
 	case "pause":
 		code = pauseCmd(os.Args[2:])
 	case "resume":
@@ -50,6 +52,7 @@ func printUsage() {
 Usage:
   surviva run [flags] -- <command> [args...]   Run and track a command
   surviva join [flags] <pid>                   Adopt an already-running process into tracking
+  surviva adopt [flags] -checkpoint-dir <path> Adopt a checkpoint made by another surviva instance
   surviva pause <job-id>                       Checkpoint a RUNNING job now
   surviva resume <job-id>                      Resume a checkpointed job
   surviva list [-json]                         List active jobs

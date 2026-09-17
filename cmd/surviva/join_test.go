@@ -23,7 +23,7 @@ func TestBuildJoinRequestRefusesNonGroupLeader(t *testing.T) {
 		t.Skip("test process happens to be its own group leader on this platform; refusal path not exercised here")
 	}
 
-	_, err = buildJoinRequest(pid, "", "", "")
+	_, err = buildJoinRequest(pid, "", "", "", "")
 	if err == nil {
 		t.Fatal("expected buildJoinRequest to refuse a non-group-leader pid")
 	}

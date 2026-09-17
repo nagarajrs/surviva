@@ -26,9 +26,10 @@ the tracked child while `run` waits on it (also used by `daemon` for
 |---|---|---|
 | `surviva run [flags] -- <cmd> [args...]` | `Register`, then `Complete` on exit | Starts `<cmd>` itself; see below. |
 | `surviva join [flags] <pid>` | `Register` | Adopts an already-running external process; see below. |
+| `surviva adopt [flags] -checkpoint-dir <path>` | `Adopt` | Registers a checkpoint made by a different surviva-daemon instance; see below. |
 | `surviva pause <job-id>` | `Pause` | |
 | `surviva resume <job-id>` | `Resume` | |
-| `surviva list [-json]` | `List` | Active jobs only. |
+| `surviva list [-json] [-tag <value>]` | `List` | Active jobs only; `-tag` filters client-side. |
 | `surviva show [-json] [-history] <job-id>` | `Show` | Any status; `-history` also prints every recorded status transition. |
 | `surviva cancel <job-id>` | `Cancel` | |
 | `surviva prune [job-id]` | `Prune` | No id = all terminal jobs. |
@@ -40,7 +41,9 @@ and exit codes `0`/`1`/`2` (success/failure/usage).
 ## `surviva run`
 
 1. Parse flags: `-hook-checkpoint`, `-hook-resume`, `-checkpoint-dir`
-   (optional override, forwarded as `RegisterJob.CheckpointDir`), `-socket`.
+   (optional override, forwarded as `RegisterJob.CheckpointDir`), `-tag`
+   (optional external identifier, e.g. `$SLURM_JOB_ID` — forwarded as
+   `RegisterJob.Tag`, never interpreted by surviva itself), `-socket`.
 2. `cmd.SysProcAttr = procattr.New()`; `fdguard.CloseInherited()`; `cmd.Start()`.
 3. Forward SIGINT/SIGTERM to the child's process group as SIGTERM: the
    child's own session means a terminal's Ctrl-C never reaches it directly,
@@ -81,14 +84,38 @@ built request:
   those processes at risk of being killed too on `cancel`. See Open
   Questions — this materially limits what `join` can adopt.
 
+## `surviva adopt -checkpoint-dir <path>`
+
+Registers a job directly against a pre-existing checkpoint that some other
+surviva-daemon instance already produced — for example, the original
+compute node in a cluster was terminated, but its checkpoint directory sits
+on shared/network storage this daemon can also reach. Flags:
+`-checkpoint-dir` (required), `-hook-resume`/`-hook-checkpoint` (as with
+`run`/`join`), `-tag`, `-socket`.
+
+Sends `Adopt`, not `Register` — the daemon inserts a new job straight into
+`CHECKPOINT_CREATED` with no `PID` yet (see [daemon.md](daemon.md)'s Adopt
+section for the validation it does). On success, prints the assigned job id
+and a reminder to run `surviva resume <job-id>` next — `adopt` only
+registers the checkpoint, it never restores it. Adopting a `CheckpointDir`
+already tracked by an active job on this daemon is refused.
+
 ## `surviva list` / `surviva show`
 
-Table for `list` (`JOB ID`, `PID`, `STATUS`, `DURATION`, `COMMAND`), a full
-key:value dump for `show` (every `store.Job` field including `Owner`,
-`CheckpointDir` and `FailureReason` when set, plus a computed `Duration`
-line). Both take `-json` for the raw `store.Job`/`[]store.Job` the daemon
-returned (`show -json` additionally wraps in `duration` and, with
+Table for `list` (`JOB ID`, `PID`, `STATUS`, `DURATION`, `TAG`, `COMMAND`), a
+full key:value dump for `show` (every `store.Job` field including `Owner`,
+`CheckpointDir`, `Tag` and `FailureReason` when set, plus a computed
+`Duration` line). Both take `-json` for the raw `store.Job`/`[]store.Job`
+the daemon returned (`show -json` additionally wraps in `duration` and, with
 `-history`, `history`).
+
+`list -tag <value>` filters the daemon's response to jobs whose `Tag`
+matches exactly — a client-side filter over the full `List()` result, not a
+server-side query: one daemon tracks at most a handful of jobs, so a linear
+scan needs no new `store`/`ipc` surface. This is how a resume-aware job
+script checks "is there already a locally-registered job for external id X"
+without needing to know a (possibly different-host, now-meaningless) old job
+id.
 
 `Duration` is computed by the CLI, not stored: `time.Since(RegisteredAt)`
 while the job is active, `UpdatedAt.Sub(RegisteredAt)` once it's terminal

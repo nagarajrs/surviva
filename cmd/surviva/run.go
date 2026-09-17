@@ -24,6 +24,7 @@ func runCmd(args []string) int {
 	hookCheckpoint := fs.String("hook-checkpoint", "", "path to a custom checkpoint script (used instead of criu)")
 	hookResume := fs.String("hook-resume", "", "path to a custom resume script (used instead of criu restore)")
 	checkpointDir := fs.String("checkpoint-dir", "", "override where this job's checkpoint is written (default: daemon-computed)")
+	tag := fs.String("tag", "", "external identifier to correlate this job with (e.g. $SLURM_JOB_ID)")
 	socketPath := fs.String("socket", ipc.DefaultSocketPath(), "path to the surviva daemon socket")
 	confPath := fs.String("conf", config.DefaultPath(), "path to surviva.conf (for audit logging)")
 	_ = fs.Parse(args)
@@ -89,6 +90,7 @@ func runCmd(args []string) int {
 		CheckpointDir:  *checkpointDir,
 		HookCheckpoint: *hookCheckpoint,
 		HookResume:     *hookResume,
+		Tag:            *tag,
 	}, requestedBy)
 	if regErr != nil {
 		fmt.Fprintf(os.Stderr, "surviva run: warning: could not register with daemon: %v\n", regErr)

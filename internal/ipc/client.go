@@ -57,6 +57,17 @@ func (c *Client) Register(j RegisterJob, requestedBy string) (string, error) {
 	return resp.JobID, nil
 }
 
+// Adopt registers a job directly against a pre-existing checkpoint (usually
+// produced by a different, no-longer-running surviva-daemon instance) so
+// this daemon can `Resume` it.
+func (c *Client) Adopt(a AdoptCheckpoint, requestedBy string) (string, error) {
+	resp, err := c.call(Request{Action: ActionAdopt, Adopt: &a, RequestedBy: requestedBy})
+	if err != nil {
+		return "", err
+	}
+	return resp.JobID, nil
+}
+
 // List returns every active (non-terminal) job.
 func (c *Client) List() ([]store.Job, error) {
 	resp, err := c.call(Request{Action: ActionList})
